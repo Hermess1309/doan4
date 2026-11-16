@@ -29,6 +29,7 @@ import vn.edu.p2p.desktop.util.ValidationUtils;
  */
 public class DashboardPanel extends JPanel {
 
+    private final JLabel lblLocalDev;
     private final JLabel lblPeerStatus;
     private final JLabel lblSecurityStatus;
     private final JLabel lblSelectedFile;
@@ -42,6 +43,7 @@ public class DashboardPanel extends JPanel {
 
     private File currentSelectedFile;
     private SessionViewModel currentSession = SessionViewModel.createDisconnected();
+    private java.util.function.Consumer<File> onSendRequested;
 
     public DashboardPanel() {
         setLayout(new BorderLayout(16, 16));
@@ -58,7 +60,7 @@ public class DashboardPanel extends JPanel {
         gbc.gridy = 0;
         connectionCard.add(new JLabel("Thiết bị này:"), gbc);
         gbc.gridx = 1;
-        JLabel lblLocalDev = new JLabel("PC-Desktop (Cổng LAN mặc định: 52001)");
+        lblLocalDev = new JLabel("PC-Desktop (Cổng LAN mặc định: 52001)");
         lblLocalDev.setFont(lblLocalDev.getFont().deriveFont(Font.BOLD));
         connectionCard.add(lblLocalDev, gbc);
 
@@ -146,6 +148,25 @@ public class DashboardPanel extends JPanel {
 
         // Sự kiện chọn tệp tin
         btnChooseFile.addActionListener(e -> chooseLocalFile());
+
+        // Sự kiện gửi tệp tin
+        btnSend.addActionListener(e -> {
+            if (currentSelectedFile != null && onSendRequested != null) {
+                onSendRequested.accept(currentSelectedFile);
+            }
+        });
+    }
+
+    public void setOnSendRequested(java.util.function.Consumer<File> onSendRequested) {
+        this.onSendRequested = onSendRequested;
+    }
+
+    public void setListeningPort(int port) {
+        if (port > 0) {
+            lblLocalDev.setText("PC-Desktop (Đang lắng nghe LAN cổng: " + port + ")");
+        } else {
+            lblLocalDev.setText("PC-Desktop (Chưa mở cổng lắng nghe)");
+        }
     }
 
     private void chooseLocalFile() {

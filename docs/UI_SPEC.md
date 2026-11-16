@@ -121,19 +121,69 @@ public interface CoreApiAdapter {
 - **UI-01**: Khung ứng dụng Java Swing, FlatLaf Dark/Light, Navigation CardLayout, các màn hình skeleton và dialog xác minh fingerprint. *(Hoàn thành — Commit 0ea73f4)*.
 - **UI-02**: Tinh chỉnh tương tác giao diện, validation dữ liệu đầu vào (IP, Port, Pairing Code, Directory, File), ViewModels, xử lý trạng thái disabled an toàn và kiểm thử tự động toàn diện. *(Hoàn thành — Commit 8cf4ecd)*.
 - **UI-QA-01**: Rà soát QA, bảo vệ an toàn luồng và clipboard, chuẩn bị adapter `CoreApiAdapter`, hoàn thiện bảng mapping tích hợp cho UI-03. *(Hoàn thành — Commit a592fa5)*.
-- **UI-SEC-01 (Hiện tại)**: Tinh chỉnh luồng bảo mật khớp 1:1 với M2 TLS 1.3 (TCP_CONNECTED -> WAITING_FOR_FINGERPRINT -> TLS_HANDSHAKING -> SECURE_READY), bổ sung ô nhập Expected Remote Fingerprint, kiểm tra 32 byte chuẩn xác.
-- **UI-03**: Nối `RealCoreApiAdapter` với API thật của `core/`, xử lý luồng sự kiện qua EDT và kiểm thử toàn diện trên Windows và Linux.
+- **UI-SEC-01**: Tinh chỉnh luồng bảo mật khớp 1:1 với M2 TLS 1.3 (TCP_CONNECTED -> WAITING_FOR_FINGERPRINT -> TLS_HANDSHAKING -> SECURE_READY), bổ sung ô nhập Expected Remote Fingerprint, kiểm tra 32 byte chuẩn xác. *(Hoàn thành — Commit 38b7d2c)*.
+- **UI-03A (Hiện tại)**: Tích hợp Core M3 thực tế (`PeerNode`, `PeerListener`, `TransferSession`) qua `RealCoreApiAdapter`, hỗ trợ truyền nhận file thật qua Mutual TLS 1.3 trên localhost/LAN, xác thực SHA-256, tự sinh danh tính bảo mật `LocalIdentityHelper`, xử lý an toàn EDT và kiểm thử toàn diện.
 
 ---
 
-## 7. Bảng Mapping Tích hợp UI ↔ Core API (UI-03 Blueprint)
+## 7. Bảng Mapping Tích hợp UI ↔ Core API (UI-03A Thực tế)
 
-| Thành phần UI (UI Action) | Phương thức Core API cần gọi | Callback / Event nhận về | Điều kiện bảo mật bắt buộc | Quy tắc điều phối luồng (Threading) |
+| Thành phần UI (UI Action) | Phương thức Core API thực tế | Trạng thái / Event nhận về | Điều kiện bảo mật bắt buộc | Quy tắc điều phối luồng (Threading) |
 | :--- | :--- | :--- | :--- | :--- |
-| **Devices — Bấm "Kết nối LAN"** | `engine.connectDirect(host, port)` | `onSessionStateChanged(SessionInfo)` | Nhập đúng cú pháp IPv4/Host và Port hợp lệ | Trả về `SessionState.TCP_CONNECTED`; chưa chạy TLS |
-| **Security — Mở dialog đối chiếu** | `engine.getLocalFingerprint()` | N/A (Truy vấn đồng bộ) | Phải có `sessionId` và socket TCP đã kết nối | Hiển thị local fingerprint; mở ô nhập remote fingerprint |
-| **Security — Bấm "Pin vân tay & Bắt tay TLS"** | `engine.verify(sessionId, expectedPin)` | `onSessionStateChanged(SessionInfo)` | Chuỗi vân tay đúng 32 byte SHA-256 (64 hex) | Core chạy mutual TLS handshake; nếu khớp chuyển `SECURE_READY`, nếu sai ném `ERROR` |
-| **Dashboard — Bấm "Bắt đầu gửi tệp"** | `engine.offerFile(sessionId, filePath)` | `onIncomingOffer(offer)`, `onProgress(progress)` | Bắt buộc phiên ở trạng thái `SECURE_READY` và tệp tin đọc được | Trả về transferId; callback `onProgress` cập nhật UI (giới hạn tần suất 100ms) |
-| **Transfers — Bấm "Hủy truyền"** | `engine.cancelTransfer(transferId)` | `onTransferFailed(transferId, "Cancelled")` | Có tác vụ đang ở trạng thái `TRANSFERRING` | Core giải phóng socket/stream; UI reset về trạng thái `CANCELLED` trên EDT |
-| **Transfers — Bấm "Tiếp tục"** | `engine.resumeTransfer(transferId)` | `onProgress(progress)` | Core M4 xác thực đủ điều kiện resume an toàn | Nếu core từ chối an toàn, UI thông báo truyền lại từ đầu |
-| **Hộp thoại nhận file gửi tới** | `engine.acceptTransfer(id, dir)` hoặc `rejectTransfer(id, reason)` | `onTransferCompleted` hoặc `onTransferFailed` | Người dùng chủ động chọn thư mục đích hợp lệ có quyền ghi | Bật popup trên EDT khi có sự kiện `onIncomingOffer` |
+| **Khởi động ứng dụng** | `PeerNode.loadIdentity`, `node.listen(port)` | Lắng nghe kết nối đến qua `PeerListener.accept()` | Sinh chứng chỉ X.509 RSA-3072 + EKU/KU nếu chưa có | Listener loop chạy trên Virtual Thread nền; không block EDT |
+| **Devices — Bấm "Kết nối LAN"** | `node.connect(host, port, timeout)` | `SessionState.TCP_CONNECTED` | Host hợp lệ (IPv4/Hostname) và Port từ 1-65535 | Chạy async trên worker pool; cập nhật ViewModel trên EDT |
+| **Security — Hiển thị Local Fingerprint** | `node.localFingerprint()` | Chuỗi Hex SHA-256 (64 ký tự) | Certificate SHA-256 từ `LocalIdentity` | Hiển thị dạng nhóm 4 ký tự dễ đọc kèm nút sao chép |
+| **Security — Pin vân tay & Bắt tay TLS** | `session.verify(expectedPin)` | `SessionState.SECURE_READY` | Chuỗi kỳ vọng đủ 32 byte SHA-256 (64 hex) | Bắt tay mTLS 1.3 trên worker thread; nếu khớp pin mới chuyển `SECURE_READY`, nếu sai ném lỗi và đóng socket |
+| **Dashboard — Bấm "Bắt đầu gửi tệp"** | `session.send(filePath, callback)` | `TransferState.OFFERED` -> `TRANSFERRING` -> `HASHING` -> `COMPLETED` | Bắt buộc phiên ở trạng thái `SECURE_READY` | Chạy stream chunked và hash SHA-256 trên worker thread; callback bọc `SwingUtilities.invokeLater` throttle 100ms |
+| **Dashboard — Có yêu cầu nhận tệp** | `session.receiveOffer()` | `onIncomingOffer(offer)` | Đề nghị gửi từ đối tác đã mTLS | Kích hoạt popup xác nhận trên EDT, yêu cầu người dùng chọn file đích chưa tồn tại |
+| **Xác nhận nhận tệp** | `session.accept(transferId, destPath, callback)` | `TransferState.TRANSFERRING` -> `HASHING` -> `COMPLETED` | File đích chưa tồn tại trên đĩa (chống ghi đè) | Stream ghi file và kiểm tra SHA-256 trên worker thread; cập nhật `TransferViewModel` |
+| **Từ chối nhận tệp** | `session.reject(transferId, reason)` | `TransferState.REJECTED` | Session hợp lệ | Báo cho đối tác qua protocol và đóng phiên an toàn |
+| **Transfers — Hủy truyền tệp** | `session.close()` / `adapter.cancelTransfer()` | `TransferState.CANCELLED` | Có tác vụ đang truyền | Ngắt socket, đóng luồng, cập nhật trạng thái trên EDT |
+| **Đóng ứng dụng** | `adapter.shutdown()` | Giải phóng toàn bộ listener, session, executor | Window closing event | Đóng `PeerListener`, ngắt active `TransferSession`, tắt Virtual Thread executor |
+
+---
+
+## 8. Kiến trúc Tích hợp Kỹ thuật (Technical Integration Architecture)
+
+### 8.1. Adapter Layer & Virtual Threading
+- **`CoreApiAdapter`**: Interface chuẩn hóa giữa tầng UI Swing và Core Backend.
+- **`DummyCoreApiAdapter`**: Mock adapter tĩnh dùng cho UI preview, GUI layout tests và CI headless tests mà không cần mở socket hay đĩa thật.
+- **`RealCoreApiAdapter`**:
+  - Quản lý vòng đời `PeerNode`, `PeerListener` và `TransferSession`.
+  - Khởi tạo listener loop trên Virtual Thread (`Thread.ofVirtual().name("real-core-listener").start(...)`).
+  - Mọi tác vụ I/O, handshake, truyền tải chạy trên `Executors.newVirtualThreadPerTaskExecutor()`.
+  - Toàn bộ cập nhật giao diện (Session updates, Transfer updates, Incoming offer popups) được marshalling an toàn về Event Dispatch Thread (EDT) bằng `SwingUtilities.invokeLater`.
+
+### 8.2. Quản lý Danh tính Cục bộ (`LocalIdentityHelper`)
+- Vị trí lưu trữ mặc định: `.p2p/keystore.p12` trong user home directory.
+- Có thể ghi đè thông qua System Properties: `-Dp2p.identity.store=...`, `-Dp2p.identity.name=...`, `-Dp2p.identity.password=...`.
+- Tự động sinh danh tính hợp chuẩn nếu chưa tồn tại: RSA 3072-bit, SHA256withRSA, non-CA, `KU=digitalSignature`, `EKU=serverAuth,clientAuth`.
+- Luôn thu dọn mảng `char[]` mật khẩu trong khối `finally`.
+
+### 8.3. Quy trình Kiểm thử Thực tế Hai Node (Localhost / LAN Verification)
+1. **Khởi chạy Node A (Alice)**:
+   ```bash
+   java -Dp2p.identity.store=.p2p/alice.p12 -jar desktop/build/libs/desktop-all.jar
+   ```
+   - Node A lắng nghe trên cổng 52001 (hoặc cổng hiển thị ở Status Bar).
+   - Vào tab "Bảo mật", sao chép SHA-256 Fingerprint của Alice.
+
+2. **Khởi chạy Node B (Bob)**:
+   ```bash
+   java -Dp2p.identity.store=.p2p/bob.p12 -jar desktop/build/libs/desktop-all.jar
+   ```
+   - Node B lắng nghe trên cổng 52002.
+   - Sao chép SHA-256 Fingerprint của Bob.
+
+3. **Kết nối & Bắt tay TLS**:
+   - Từ Bob, vào tab "Thiết bị", nhập `127.0.0.1` và cổng của Alice (ví dụ `52001`), bấm "Kết nối LAN".
+   - Hai node chuyển sang `TCP_CONNECTED` / `WAITING_FOR_FINGERPRINT`.
+   - Node A nhập Fingerprint của Bob vào ô "Expected Remote Fingerprint", bấm "Pin vân tay & Bắt tay TLS 1.3".
+   - Node B nhập Fingerprint của Alice, bấm "Pin vân tay & Bắt tay TLS 1.3".
+   - Hai bên hoàn tất Mutual TLS 1.3 và chuyển sang `SECURE_READY`. Nút "Bắt đầu gửi tệp" được kích hoạt.
+
+4. **Truyền tệp & Kiểm tra toàn vẹn**:
+   - Từ Dashboard của Alice, chọn tệp tin cần gửi và bấm "Bắt đầu gửi tệp".
+   - Bob nhận được thông báo yêu cầu nhận tệp kèm tên và kích thước.
+   - Bob chọn thư mục và tên file lưu (chưa tồn tại).
+   - Thanh tiến trình trên cả hai máy hiển thị tốc độ, tiến độ và chuyển sang `COMPLETED` sau khi SHA-256 được đối chiếu thành công.

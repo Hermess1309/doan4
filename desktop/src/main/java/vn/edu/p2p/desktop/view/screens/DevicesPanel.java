@@ -40,6 +40,8 @@ public class DevicesPanel extends JPanel {
     private final JLabel lblInputError;
 
     private SessionViewModel currentSession = SessionViewModel.createDisconnected();
+    private java.util.function.BiConsumer<String, Integer> onConnectLanRequested;
+    private Runnable onDisconnectRequested;
 
     public DevicesPanel() {
         setLayout(new BorderLayout(16, 16));
@@ -173,6 +175,19 @@ public class DevicesPanel extends JPanel {
         // Sự kiện validation khi click nút (không gọi socket blocking)
         btnConnectLan.addActionListener(e -> validateAndHandleLanConnect());
         btnConnectRelay.addActionListener(e -> validateAndHandleRelayConnect());
+        btnDisconnect.addActionListener(e -> {
+            if (onDisconnectRequested != null) {
+                onDisconnectRequested.run();
+            }
+        });
+    }
+
+    public void setOnConnectLanRequested(java.util.function.BiConsumer<String, Integer> onConnectLanRequested) {
+        this.onConnectLanRequested = onConnectLanRequested;
+    }
+
+    public void setOnDisconnectRequested(Runnable onDisconnectRequested) {
+        this.onDisconnectRequested = onDisconnectRequested;
     }
 
     private void validateAndHandleLanConnect() {
@@ -189,8 +204,18 @@ public class DevicesPanel extends JPanel {
         }
 
         lblInputError.setText("");
-        lblConnectionStatus.setText("ĐÃ NỐI TCP — CHỜ NHẬP VÂN TAY (Chưa bắt tay TLS)");
-        lblPeerDetails.setText("Đối tác: " + host + ":" + portStr + " (Vào mục 'Bảo mật' để đối chiếu vân tay)");
+        lblConnectionStatus.setText("ĐANG KẾT NỐI TCP...");
+        lblPeerDetails.setText("Đang kết nối tới " + host + ":" + portStr + "...");
+
+        if (onConnectLanRequested != null) {
+            try {
+                int port = Integer.parseInt(portStr);
+                onConnectLanRequested.accept(host, port);
+            } catch (NumberFormatException ignored) {}
+        } else {
+            lblConnectionStatus.setText("ĐÃ NỐI TCP — CHỜ NHẬP VÂN TAY (Chưa bắt tay TLS)");
+            lblPeerDetails.setText("Đối tác: " + host + ":" + portStr + " (Vào mục 'Bảo mật' để đối chiếu vân tay)");
+        }
     }
 
     private void validateAndHandleRelayConnect() {

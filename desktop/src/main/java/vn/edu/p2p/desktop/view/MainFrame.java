@@ -4,11 +4,22 @@ import java.awt.BorderLayout;
 import java.awt.CardLayout;
 import java.awt.Color;
 import java.awt.Dimension;
+import java.io.File;
+import java.util.function.Consumer;
 import javax.swing.JFrame;
+import javax.swing.JOptionPane;
 import javax.swing.JPanel;
+import javax.swing.SwingUtilities;
+import vn.edu.p2p.core.FileOffer;
+import vn.edu.p2p.desktop.adapter.CoreApiAdapter;
+import vn.edu.p2p.desktop.adapter.DummyCoreApiAdapter;
+import vn.edu.p2p.desktop.adapter.RealCoreApiAdapter;
+import vn.edu.p2p.desktop.model.AppSettings;
 import vn.edu.p2p.desktop.model.SessionViewModel;
 import vn.edu.p2p.desktop.model.SessionViewModel.SessionState;
 import vn.edu.p2p.desktop.model.TransferViewModel;
+import vn.edu.p2p.desktop.util.Formatters;
+import vn.edu.p2p.desktop.util.ValidationUtils;
 import vn.edu.p2p.desktop.view.screens.DashboardPanel;
 import vn.edu.p2p.desktop.view.screens.DevicesPanel;
 import vn.edu.p2p.desktop.view.screens.SecurityPanel;
@@ -21,6 +32,7 @@ import vn.edu.p2p.desktop.view.screens.TransfersPanel;
  */
 public class MainFrame extends JFrame {
 
+    private final CoreApiAdapter adapter;
     private final CardLayout cardLayout;
     private final JPanel cardsPanel;
     private final SidebarPanel sidebarPanel;
@@ -33,8 +45,16 @@ public class MainFrame extends JFrame {
     private final SecurityPanel securityPanel;
     private final SettingsPanel settingsPanel;
 
+    private SessionViewModel currentSession = SessionViewModel.createDisconnected();
+
     public MainFrame() {
+        this(new DummyCoreApiAdapter());
+    }
+
+    public MainFrame(CoreApiAdapter adapter) {
         super("P2P File Transfer — Secure End-to-End (Java 21 & FlatLaf)");
+        this.adapter = (adapter != null) ? adapter : new DummyCoreApiAdapter();
+
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setSize(980, 640);
         setMinimumSize(new Dimension(820, 540));
@@ -51,6 +71,57 @@ public class MainFrame extends JFrame {
         transfersPanel = new TransfersPanel();
         securityPanel = new SecurityPanel();
         settingsPanel = new SettingsPanel();
+
+        // Cập nhật cấu hình ban đầu từ adapter
+        securityPanel.setLocalFingerprint(this.adapter.getLocalFingerprint());
+        dashboardPanel.setListeningPort(this.adapter.getListenPort());
+
+        // Lắng nghe sự kiện từ DashboardPanel
+        dashboardPanel.setOnSendRequested(file -> {
+            if (currentSession != null && currentSession.isReadyToTransfer()) {
+                this.adapter.offerFile(currentSession.sessionId(), file);
+                navigateToTab(SidebarPanel.TAB_TRANSFERS);
+            }
+        });
+
+        // Lắng nghe sự kiện từ DevicesPanel
+        devicesPanel.setOnConnectLanRequested((host, port) -> {
+            this.adapter.connectDirect(host, port);
+        });
+        devicesPanel.setOnDisconnectRequested(() -> {
+            if (currentSession != null && !currentSession.sessionId().isBlank()) {
+                this.adapter.disconnect(currentSession.sessionId());
+            }
+        });
+
+        // Lắng nghe sự kiện từ SecurityPanel
+        securityPanel.setOnTlsHandshakeRequested((sessionId, pin) -> {
+            this.adapter.startTlsHandshake(sessionId, pin);
+        });
+
+        // Lắng nghe sự kiện từ TransfersPanel
+        transfersPanel.setOnCancelRequested(transferId -> {
+            this.adapter.cancelTransfer(transferId);
+        });
+
+        // Đăng ký nhận cập nhật từ CoreApiAdapter
+        this.adapter.registerListeners(
+                sessionVm -> SwingUtilities.invokeLater(() -> updateSession(sessionVm)),
+                transferVm -> SwingUtilities.invokeLater(() -> updateTransfer(transferVm))
+        );
+
+        // Đăng ký bộ xử lý nhận đề nghị gửi tệp nếu là RealCoreApiAdapter
+        if (this.adapter instanceof RealCoreApiAdapter realAdapter) {
+            realAdapter.setIncomingOfferHandler(this::promptIncomingOfferDialog);
+        }
+
+        // Đóng adapter khi thoát ứng dụng
+        addWindowListener(new java.awt.event.WindowAdapter() {
+            @Override
+            public void windowClosing(java.awt.event.WindowEvent e) {
+                MainFrame.this.adapter.shutdown();
+            }
+        });
 
         // Vùng chứa CardLayout
         cardLayout = new CardLayout();
@@ -76,6 +147,53 @@ public class MainFrame extends JFrame {
         sidebarPanel.setOnNavigate(this::navigateToTab);
     }
 
+    private void promptIncomingOfferDialog(FileOffer offer, Consumer<File> decisionCallback) {
+        String message = String.format("""
+                Thiết bị đối tác gửi yêu cầu truyền tệp tin:
+                - Tên tệp: %s
+                - Dung lượng: %s
+                - Băm SHA-256: %s
+
+                Bạn có muốn tiếp nhận tệp tin này không?
+                """,
+                offer.fileName(),
+                Formatters.formatBytes(offer.size()),
+                offer.sha256());
+
+        int choice = JOptionPane.showConfirmDialog(
+                this,
+                message,
+                "Yêu cầu truyền tệp tin đến",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.QUESTION_MESSAGE
+        );
+
+        if (choice == JOptionPane.YES_OPTION) {
+            javax.swing.JFileChooser chooser = new javax.swing.JFileChooser(AppSettings.getDownloadDirectory());
+            chooser.setDialogTitle("Chọn vị trí lưu tệp tin (Không được ghi đè)");
+            chooser.setSelectedFile(new File(AppSettings.getDownloadDirectory(), ValidationUtils.sanitizeFileName(offer.fileName())));
+
+            int saveChoice = chooser.showSaveDialog(this);
+            if (saveChoice == javax.swing.JFileChooser.APPROVE_OPTION) {
+                File targetFile = chooser.getSelectedFile();
+                if (targetFile.exists()) {
+                    JOptionPane.showMessageDialog(
+                            this,
+                            "Tệp tin đã tồn tại trên đĩa! Theo chính sách bảo mật M3, không được ghi đè.",
+                            "Cảnh báo trùng lặp tệp",
+                            JOptionPane.WARNING_MESSAGE
+                    );
+                    decisionCallback.accept(null);
+                    return;
+                }
+                decisionCallback.accept(targetFile);
+                navigateToTab(SidebarPanel.TAB_TRANSFERS);
+                return;
+            }
+        }
+        decisionCallback.accept(null);
+    }
+
     public void navigateToTab(String tabKey) {
         cardLayout.show(cardsPanel, tabKey);
         sidebarPanel.setSelectedTab(tabKey);
@@ -95,9 +213,10 @@ public class MainFrame extends JFrame {
      * TLS_HANDSHAKING, SECURE_READY.
      */
     public void updateSession(SessionViewModel session) {
-        dashboardPanel.updateSessionState(session);
-        devicesPanel.updateSession(session);
-        securityPanel.updateSession(session);
+        this.currentSession = (session != null) ? session : SessionViewModel.createDisconnected();
+        dashboardPanel.updateSessionState(currentSession);
+        devicesPanel.updateSession(currentSession);
+        securityPanel.updateSession(currentSession);
 
         if (session == null || session.sessionId().isBlank() || session.state() == SessionState.DISCONNECTED) {
             headerPanel.setConnectionBadge("[ Chưa kết nối ]", new Color(157, 160, 168));

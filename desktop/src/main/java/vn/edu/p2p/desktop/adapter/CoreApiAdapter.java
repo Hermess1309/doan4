@@ -31,6 +31,11 @@ public interface CoreApiAdapter {
     String getLocalFingerprint();
 
     /**
+     * Lấy cổng mạng LAN mà ứng dụng đang lắng nghe kết nối đến (0 nếu chưa lắng nghe).
+     */
+    int getListenPort();
+
+    /**
      * Cung cấp fingerprint của đối tác đã đối chiếu qua kênh độc lập,
      * khởi động quá trình bắt tay Mutual TLS 1.3 có pinning chứng chỉ.
      * Trả về session ở trạng thái SECURE_READY nếu thành công hoặc ERROR nếu thất bại.
@@ -72,4 +77,9 @@ public interface CoreApiAdapter {
      * Toàn bộ cập nhật sẽ được đẩy về Swing EDT an toàn.
      */
     void registerListeners(Consumer<SessionViewModel> onSessionUpdate, Consumer<TransferViewModel> onTransferUpdate);
+
+    /**
+     * Đóng toàn bộ listener, phiên kết nối đang mở và giải phóng thread pool.
+     */
+    void shutdown();
 }

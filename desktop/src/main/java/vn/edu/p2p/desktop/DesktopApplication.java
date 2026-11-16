@@ -35,8 +35,15 @@ public final class DesktopApplication {
 
         // 3. Khởi tạo MainFrame trên Event Dispatch Thread (EDT) cho người dùng
         SwingUtilities.invokeLater(() -> {
-            MainFrame mainFrame = new MainFrame();
-            mainFrame.setVisible(true);
+            try {
+                vn.edu.p2p.desktop.adapter.RealCoreApiAdapter adapter = vn.edu.p2p.desktop.adapter.RealCoreApiAdapter.createDefault();
+                MainFrame mainFrame = new MainFrame(adapter);
+                mainFrame.setVisible(true);
+            } catch (Exception e) {
+                System.err.println("Không thể khởi tạo Core Adapter tự động: " + e.getMessage());
+                MainFrame mainFrame = new MainFrame();
+                mainFrame.setVisible(true);
+            }
         });
     }
 

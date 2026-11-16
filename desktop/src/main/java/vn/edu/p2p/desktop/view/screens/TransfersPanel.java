@@ -37,6 +37,7 @@ public class TransfersPanel extends JPanel {
     private final JButton btnOpenFolder;
 
     private TransferViewModel currentTransfer = TransferViewModel.createIdle();
+    private java.util.function.Consumer<String> onCancelRequested;
 
     public TransfersPanel() {
         setLayout(new BorderLayout(16, 16));
@@ -143,6 +144,28 @@ public class TransfersPanel extends JPanel {
         container.add(Box.createVerticalGlue());
 
         add(container, BorderLayout.NORTH);
+
+        btnCancel.addActionListener(e -> {
+            if (onCancelRequested != null && currentTransfer != null && !currentTransfer.transferId().isBlank()) {
+                onCancelRequested.accept(currentTransfer.transferId());
+            }
+        });
+
+        btnOpenFolder.addActionListener(e -> {
+            try {
+                String downloadDir = vn.edu.p2p.desktop.model.AppSettings.getDownloadDirectory();
+                File folder = new File(downloadDir);
+                if (folder.exists() && java.awt.Desktop.isDesktopSupported()) {
+                    java.awt.Desktop.getDesktop().open(folder);
+                }
+            } catch (Exception ex) {
+                System.err.println("Không thể mở thư mục: " + ex.getMessage());
+            }
+        });
+    }
+
+    public void setOnCancelRequested(java.util.function.Consumer<String> onCancelRequested) {
+        this.onCancelRequested = onCancelRequested;
     }
 
     /**
@@ -173,13 +196,14 @@ public class TransfersPanel extends JPanel {
         }
 
         // Cập nhật trạng thái các nút theo trạng thái truyền
-        boolean isRunning = transfer.state() == TransferViewModel.TransferState.TRANSFERRING;
+        boolean isRunning = transfer.state() == TransferViewModel.TransferState.TRANSFERRING
+                || transfer.state() == TransferViewModel.TransferState.HASHING
+                || transfer.state() == TransferViewModel.TransferState.OFFERED
+                || transfer.state() == TransferViewModel.TransferState.VERIFYING_FILE;
         boolean isCompleted = transfer.state() == TransferViewModel.TransferState.COMPLETED;
-        boolean isFailed = transfer.state() == TransferViewModel.TransferState.FAILED;
 
-        // Lưu ý: Nút cancel/resume chỉ bật khi có phiên thật ở UI-03; ở UI-02 giữ disabled theo yêu cầu
-        btnCancel.setEnabled(false);
-        btnResume.setEnabled(false);
+        btnCancel.setEnabled(isRunning);
+        btnResume.setEnabled(false); // Chưa hỗ trợ ở M3
         btnOpenFolder.setEnabled(isCompleted);
     }
 

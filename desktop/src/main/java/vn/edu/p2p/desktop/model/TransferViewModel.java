@@ -33,12 +33,14 @@ public record TransferViewModel(
 
     public enum TransferState {
         IDLE("Sẵn sàng (Chưa có tệp)"),
+        HASHING("Đang kiểm tra băm SHA-256..."),
         OFFERED("Đã gửi/nhận đề nghị truyền tệp (Offered)..."),
         QUEUED("Đang chờ gửi..."),
         TRANSFERRING("Đang truyền dữ liệu..."),
         PAUSED("Đã tạm dừng"),
         VERIFYING_FILE("Đang xác thực toàn vẹn SHA-256..."),
         COMPLETED("Hoàn tất truyền tải"),
+        REJECTED("Bị từ chối (Rejected)"),
         FAILED("Thất bại"),
         CANCELLED("Đã hủy bỏ");
 

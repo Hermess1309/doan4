@@ -77,6 +77,13 @@ public final class ValidationUtils {
     /**
      * Kiểm tra cổng mạng hợp lệ (từ 1 đến 65535).
      */
+    public static boolean isValidPort(int port) {
+        return port >= 1 && port <= 65535;
+    }
+
+    /**
+     * Kiểm tra cổng mạng hợp lệ (từ 1 đến 65535).
+     */
     public static boolean isValidPort(String portStr) {
         if (portStr == null) {
             return false;
@@ -87,7 +94,7 @@ public final class ValidationUtils {
         }
         try {
             int port = Integer.parseInt(trimmed);
-            return port >= 1 && port <= 65535;
+            return isValidPort(port);
         } catch (NumberFormatException e) {
             return false;
         }
@@ -154,5 +161,16 @@ public final class ValidationUtils {
             return false;
         }
         return file.exists() && file.isFile() && file.canRead();
+    }
+
+    /**
+     * Chuẩn hóa tên tệp tin an toàn từ dữ liệu peer gửi tới (loại bỏ path traversal và ký tự cấm).
+     */
+    public static String sanitizeFileName(String rawName) {
+        if (rawName == null || rawName.isBlank()) {
+            return "downloaded_file.bin";
+        }
+        String base = java.nio.file.Path.of(rawName).getFileName().toString();
+        return base.replaceAll("[\\\\/:*?\"<>|]", "_");
     }
 }
