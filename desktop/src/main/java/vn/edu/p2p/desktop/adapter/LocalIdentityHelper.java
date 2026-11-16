@@ -2,8 +2,10 @@ package vn.edu.p2p.desktop.adapter;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.security.GeneralSecurityException;
 import java.security.SecureRandom;
 import java.util.Arrays;
@@ -117,7 +119,18 @@ public final class LocalIdentityHelper {
             Files.createDirectories(storePath.getParent());
         }
         Files.writeString(passFile, generatedPassword, StandardCharsets.UTF_8);
+        setRestrictedPermissionsIfSupported(passFile);
         return generatedPassword.toCharArray();
+    }
+
+    private static void setRestrictedPermissionsIfSupported(Path file) {
+        if (FileSystems.getDefault().supportedFileAttributeViews().contains("posix")) {
+            try {
+                Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-------"));
+            } catch (Exception ignored) {
+                // Best effort trên các môi trường POSIX hỗ trợ
+            }
+        }
     }
 
     public static void generateIdentityWithKeytool(Path storePath, char[] password, String alias) throws Exception {
@@ -165,5 +178,6 @@ public final class LocalIdentityHelper {
             String errorMsg = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
             throw new IOException("Sinh danh tính thất bại: " + errorMsg);
         }
+        setRestrictedPermissionsIfSupported(storePath);
     }
 }

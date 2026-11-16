@@ -154,36 +154,62 @@ public interface CoreApiAdapter {
   - Mọi tác vụ I/O, handshake, truyền tải chạy trên `Executors.newVirtualThreadPerTaskExecutor()`.
   - Toàn bộ cập nhật giao diện (Session updates, Transfer updates, Incoming offer popups) được marshalling an toàn về Event Dispatch Thread (EDT) bằng `SwingUtilities.invokeLater`.
 
-### 8.2. Quản lý Danh tính Cục bộ (`LocalIdentityHelper`)
-- Vị trí lưu trữ mặc định: `.p2p/keystore.p12` trong user home directory.
-- Có thể ghi đè thông qua System Properties: `-Dp2p.identity.store=...`, `-Dp2p.identity.name=...`, `-Dp2p.identity.password=...`.
-- Tự động sinh danh tính hợp chuẩn nếu chưa tồn tại: RSA 3072-bit, SHA256withRSA, non-CA, `KU=digitalSignature`, `EKU=serverAuth,clientAuth`.
-- Luôn thu dọn mảng `char[]` mật khẩu trong khối `finally`.
+### 8.2. Quản lý Danh tính Cục bộ & Mật khẩu An toàn (`LocalIdentityHelper`)
+- Vị trí lưu trữ mặc định: `%LOCALAPPDATA%/P2pFileTransfer/` (Windows) hoặc `~/.local/share/p2p-file-transfer/` (Linux).
+- Có thể phân biệt tên instance qua cờ `--name=alice` hoặc `--name=bob`.
+- **Chính sách mật khẩu an toàn**:
+  - Không sử dụng mật khẩu mặc định yếu (không dùng "changeit", "password123").
+  - Tự động sinh mật khẩu ngẫu nhiên 128-bit entropy (32 ký tự hex) bằng `SecureRandom`.
+  - Mật khẩu lưu trong tệp `.pass` cùng thư mục với quyền đọc nghiêm ngặt (POSIX `0600` / `rw-------` trên Linux, User ACL trên Windows).
+  - Không truyền mật khẩu qua tham số dòng lệnh để tránh rò rỉ trong danh sách tiến trình (`ps`, Task Manager). Keytool nhận mật khẩu qua biến môi trường `-storepass:env`.
+  - Luôn xóa mảng `char[]` mật khẩu trong khối `finally`.
 
-### 8.3. Quy trình Kiểm thử Thực tế Hai Node (Localhost / LAN Verification)
-1. **Khởi chạy Node A (Alice)**:
-   ```bash
-   java -Dp2p.identity.store=.p2p/alice.p12 -jar desktop/build/libs/desktop-all.jar
-   ```
-   - Node A lắng nghe trên cổng 52001 (hoặc cổng hiển thị ở Status Bar).
-   - Vào tab "Bảo mật", sao chép SHA-256 Fingerprint của Alice.
+### 8.3. Phương thức Khởi chạy Ứng dụng Thực tế (Đã xác minh)
+Module `desktop` là ứng dụng đa module phụ thuộc vào `:core`, `:crypto`, `:protocol` và FlatLaf. Tệp `desktop.jar` thông thường không chứa fat-jar bundle, do đó **không sử dụng `java -jar desktop.jar`**. Sử dụng một trong hai phương thức chuẩn hóa sau:
 
-2. **Khởi chạy Node B (Bob)**:
-   ```bash
-   java -Dp2p.identity.store=.p2p/bob.p12 -jar desktop/build/libs/desktop-all.jar
-   ```
-   - Node B lắng nghe trên cổng 52002.
-   - Sao chép SHA-256 Fingerprint của Bob.
+#### Cách 1: Native Launcher qua `installDist` (Khuyên dùng cho Demo)
+Biên dịch bản phân phối đầy đủ:
+```bash
+# Windows
+.\gradlew.bat :desktop:installDist
 
-3. **Kết nối & Bắt tay TLS**:
-   - Từ Bob, vào tab "Thiết bị", nhập `127.0.0.1` và cổng của Alice (ví dụ `52001`), bấm "Kết nối LAN".
-   - Hai node chuyển sang `TCP_CONNECTED` / `WAITING_FOR_FINGERPRINT`.
-   - Node A nhập Fingerprint của Bob vào ô "Expected Remote Fingerprint", bấm "Pin vân tay & Bắt tay TLS 1.3".
-   - Node B nhập Fingerprint của Alice, bấm "Pin vân tay & Bắt tay TLS 1.3".
-   - Hai bên hoàn tất Mutual TLS 1.3 và chuyển sang `SECURE_READY`. Nút "Bắt đầu gửi tệp" được kích hoạt.
+# Ubuntu / Linux
+./gradlew :desktop:installDist
+```
 
-4. **Truyền tệp & Kiểm tra toàn vẹn**:
-   - Từ Dashboard của Alice, chọn tệp tin cần gửi và bấm "Bắt đầu gửi tệp".
-   - Bob nhận được thông báo yêu cầu nhận tệp kèm tên và kích thước.
-   - Bob chọn thư mục và tên file lưu (chưa tồn tại).
-   - Thanh tiến trình trên cả hai máy hiển thị tốc độ, tiến độ và chuyển sang `COMPLETED` sau khi SHA-256 được đối chiếu thành công.
+Khởi chạy 2 Node (Alice và Bob) trên 2 cổng và danh tính riêng biệt:
+- **Node A (Alice — Cổng 52001)**:
+  - Windows: `.\desktop\build\install\desktop\bin\desktop.bat --name=alice --port=52001`
+  - Linux: `./desktop/build/install/desktop/bin/desktop --name=alice --port=52001`
+- **Node B (Bob — Cổng 52002)**:
+  - Windows: `.\desktop\build\install\desktop\bin\desktop.bat --name=bob --port=52002`
+  - Linux: `./desktop/build/install/desktop/bin/desktop --name=bob --port=52002`
+
+#### Cách 2: Trực tiếp qua Gradle
+- Node A (Alice): `.\gradlew.bat :desktop:run --args="--name=alice --port=52001"`
+- Node B (Bob): `.\gradlew.bat :desktop:run --args="--name=bob --port=52002"`
+
+#### Chế độ Smoke Test (Tự động thoát sau kiểm tra)
+- `.\desktop\build\install\desktop\bin\desktop.bat --smoke-test`
+- Hoặc kết hợp tham số: `.\desktop\build\install\desktop\bin\desktop.bat --name=alice --port=52001 --smoke-test` (Tự kiểm tra khởi tạo, giải phóng giao diện và thoát sạch trong < 5 giây với exit code 0).
+
+### 8.4. Kịch bản Demo Truyền Tệp Hai Node (Localhost / LAN)
+1. **Xác định IP & Cổng**:
+   - Khởi chạy Alice và Bob theo lệnh ở mục 8.3.
+   - Quan sát thanh Status Bar: Alice lắng nghe cổng `52001`, Bob lắng nghe cổng `52002`.
+2. **Đối chiếu Vân tay (Out-of-band Fingerprint)**:
+   - Trên cả hai ứng dụng, chuyển sang tab **Bảo mật**.
+   - Bấm nút **Sao chép** để lấy chuỗi SHA-256 Fingerprint cục bộ của mỗi bên.
+3. **Kết nối LAN**:
+   - Từ Bob, chuyển sang tab **Thiết bị**, nhập IP `127.0.0.1` (hoặc IP LAN của máy Alice nếu chạy 2 máy) và cổng `52001`.
+   - Bấm nút **Kết nối LAN**. Cả hai ứng dụng chuyển sang trạng thái `TCP_CONNECTED` (viền vàng, thông báo chưa có TLS).
+4. **Pinning & Bắt tay Mutual TLS 1.3**:
+   - Tại Alice: Dán Fingerprint của Bob vào ô *Expected Remote Fingerprint*, bấm **Pin vân tay & Bắt tay TLS 1.3**.
+   - Tại Bob: Dán Fingerprint của Alice vào ô *Expected Remote Fingerprint*, bấm **Pin vân tay & Bắt tay TLS 1.3**.
+   - Hai bên hoàn tất Mutual TLS 1.3 và chuyển sang **BẢO MẬT (SECURE_READY)** với viền xanh. Nút "Bắt đầu gửi tệp" ở Dashboard được kích hoạt.
+5. **Gửi & Nhận Tệp**:
+   - Từ Dashboard của Alice: chọn tệp tin cần gửi và bấm **Bắt đầu gửi tệp**.
+   - Bob nhận được thông báo yêu cầu nhận tệp kèm tên, kích thước và mã băm SHA-256; bấm Yes và chọn đường dẫn lưu tệp (chưa tồn tại).
+   - Thanh tiến trình trên cả hai máy hiển thị tốc độ, % truyền và chuyển sang `COMPLETED` sau khi mã băm SHA-256 được đối chiếu khớp tuyệt đối.
+6. **Lưu ý Giới hạn M3**:
+   - Kênh chuyển tiếp Relay (M6) và tính năng Resume tệp dở dang (M4) chưa được kích hoạt trong giao diện Desktop UI tại mốc này. Kết nối hiện tại tập trung hoàn toàn vào Direct LAN/Localhost Mutual TLS 1.3.

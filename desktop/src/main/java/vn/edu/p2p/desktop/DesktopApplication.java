@@ -19,12 +19,21 @@ public final class DesktopApplication {
         // 1. Cài đặt FlatLaf Look and Feel trước khi vẽ các component Swing
         ThemeManager.initialize();
 
-        // 2. Tự động đóng nếu phát hiện môi trường kiểm thử CI/không tương tác để tránh treo runner
-        boolean isCi = "true".equalsIgnoreCase(System.getenv("CI"))
-                || Boolean.getBoolean("p2p.smoke.test")
-                || (args != null && args.length > 0 && "--smoke-test".equalsIgnoreCase(args[0]));
+        // 2. Phân tích các cờ dòng lệnh nếu được cung cấp (ví dụ: --name=alice, --port=52001, --store=...)
+        if (args != null) {
+            for (String arg : args) {
+                if (arg.startsWith("--name=")) {
+                    System.setProperty("p2p.identity.name", arg.substring("--name=".length()).trim());
+                } else if (arg.startsWith("--port=")) {
+                    System.setProperty("p2p.listen.port", arg.substring("--port=".length()).trim());
+                } else if (arg.startsWith("--store=")) {
+                    System.setProperty("p2p.identity.store", arg.substring("--store=".length()).trim());
+                }
+            }
+        }
 
-        if (isCi) {
+        // 3. Tự động đóng nếu phát hiện cờ kiểm thử --smoke-test hoặc môi trường CI
+        if (isSmokeCheckRequested(args)) {
             int exitCode = executeCiSmokeCheck();
             if (exitCode != 0) {
                 System.err.println("P2P File Transfer Desktop: Kiểm tra khởi tạo trong CI THẤT BẠI (exitCode=" + exitCode + ").");
@@ -33,7 +42,7 @@ public final class DesktopApplication {
             return;
         }
 
-        // 3. Khởi tạo MainFrame trên Event Dispatch Thread (EDT) cho người dùng
+        // 4. Khởi tạo MainFrame trên Event Dispatch Thread (EDT) cho người dùng
         SwingUtilities.invokeLater(() -> {
             try {
                 vn.edu.p2p.desktop.adapter.RealCoreApiAdapter adapter = vn.edu.p2p.desktop.adapter.RealCoreApiAdapter.createDefault();
@@ -45,6 +54,23 @@ public final class DesktopApplication {
                 mainFrame.setVisible(true);
             }
         });
+    }
+
+    /**
+     * Xác định ứng dụng có đang được chạy ở chế độ smoke check hoặc môi trường CI hay không.
+     */
+    static boolean isSmokeCheckRequested(String[] args) {
+        if ("true".equalsIgnoreCase(System.getenv("CI")) || Boolean.getBoolean("p2p.smoke.test")) {
+            return true;
+        }
+        if (args != null) {
+            for (String arg : args) {
+                if ("--smoke-test".equalsIgnoreCase(arg)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**

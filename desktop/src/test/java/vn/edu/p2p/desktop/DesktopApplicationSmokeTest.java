@@ -4,10 +4,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.awt.GraphicsEnvironment;
 import java.lang.reflect.InvocationTargetException;
+import java.time.Duration;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.swing.SwingUtilities;
@@ -93,5 +95,22 @@ class DesktopApplicationSmokeTest {
         assertTrue(validated.get(), "frameValidator phải được gọi");
         assertNotNull(frameRef.get(), "frameRef phải khác null");
         assertFalse(frameRef.get().isDisplayable(), "Frame phải được gọi dispose() để giải phóng tài nguyên GUI kể cả khi có ngoại lệ");
+    }
+
+    @Test
+    void testIsSmokeCheckRequestedDetection() {
+        // Cờ --smoke-test ở bất kỳ vị trí nào trong mảng args đều phải được phát hiện
+        assertTrue(DesktopApplication.isSmokeCheckRequested(new String[] {"--smoke-test"}));
+        assertTrue(DesktopApplication.isSmokeCheckRequested(new String[] {"--name=alice", "--port=52001", "--smoke-test"}));
+        assertTrue(DesktopApplication.isSmokeCheckRequested(new String[] {"--smoke-test", "--name=bob"}));
+    }
+
+    @Test
+    void testSmokeTestCompletesWithinTimeoutWithoutHanging() {
+        assertTimeoutPreemptively(Duration.ofSeconds(10), () -> {
+            ThemeManager.initialize();
+            int exitCode = DesktopApplication.executeCiSmokeCheck();
+            assertEquals(0, exitCode, "Smoke check phải hoàn tất trong 10 giây và trả về 0");
+        });
     }
 }

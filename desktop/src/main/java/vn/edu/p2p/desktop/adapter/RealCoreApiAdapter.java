@@ -87,7 +87,8 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
 
     public static RealCoreApiAdapter createDefault() throws Exception {
         PeerNode node = LocalIdentityHelper.getOrCreateDefaultIdentity();
-        return new RealCoreApiAdapter(node, DEFAULT_LAN_PORT);
+        int preferredPort = Integer.getInteger("p2p.listen.port", DEFAULT_LAN_PORT);
+        return new RealCoreApiAdapter(node, preferredPort);
     }
 
     public static RealCoreApiAdapter create(PeerNode node, int port) throws IOException {
