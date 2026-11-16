@@ -1,11 +1,15 @@
 package vn.edu.p2p.desktop;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.awt.GraphicsEnvironment;
 import java.lang.reflect.InvocationTargetException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import javax.swing.SwingUtilities;
 import org.junit.jupiter.api.Test;
 import vn.edu.p2p.desktop.util.ThemeManager;
@@ -57,5 +61,37 @@ class DesktopApplicationSmokeTest {
 
             frame.dispose();
         });
+    }
+
+    @Test
+    void testExecuteCiSmokeCheckReturnsSuccessNormally() {
+        ThemeManager.initialize();
+        int exitCode = DesktopApplication.executeCiSmokeCheck();
+        assertEquals(0, exitCode, "executeCiSmokeCheck() phải trả về 0 khi khởi tạo bình thường");
+    }
+
+    @Test
+    void testExecuteCiSmokeCheckCatchesFailureAndDisposesResources() {
+        if (GraphicsEnvironment.isHeadless()) {
+            // Trong môi trường Headless, không tạo frame nên không kích hoạt validator
+            return;
+        }
+
+        AtomicReference<MainFrame> frameRef = new AtomicReference<>();
+        AtomicBoolean validated = new AtomicBoolean(false);
+
+        int exitCode = DesktopApplication.executeCiSmokeCheck(frame -> {
+            frameRef.set(frame);
+            validated.set(true);
+            assertTrue(frame.isDisplayable(), "Frame phải ở trạng thái displayable trước khi dispose()");
+            // Mô phỏng ngoại lệ bất ngờ xảy ra khi build hoặc kiểm tra giao diện
+            throw new IllegalStateException("Simulated GUI layout/component exception");
+        });
+
+        assertNotEquals(0, exitCode, "Smoke check không được nuốt ngoại lệ, phải trả về mã lỗi khác 0");
+        assertEquals(1, exitCode, "Smoke check phải trả về mã lỗi 1 khi gặp ngoại lệ");
+        assertTrue(validated.get(), "frameValidator phải được gọi");
+        assertNotNull(frameRef.get(), "frameRef phải khác null");
+        assertFalse(frameRef.get().isDisplayable(), "Frame phải được gọi dispose() để giải phóng tài nguyên GUI kể cả khi có ngoại lệ");
     }
 }
