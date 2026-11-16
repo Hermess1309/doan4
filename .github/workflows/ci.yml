@@ -1,0 +1,42 @@
+name: Java 21 CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+        # Includes validation of checked-in Gradle Wrapper JARs.
+      - name: Build, smoke tests and formatting
+        shell: bash
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --console=plain clean spotlessCheck build
+      - name: Run M0 entry points
+        shell: bash
+        run: ./gradlew --no-daemon --console=plain :cli:run :desktop:run
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-${{ matrix.os }}
+          path: |
+            **/build/reports/tests/test/
+            **/build/test-results/test/*.xml
+          if-no-files-found: warn
