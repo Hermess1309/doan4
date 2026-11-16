@@ -12,7 +12,7 @@ import vn.edu.p2p.core.TransferProgress;
 import vn.edu.p2p.core.TransferResult;
 import vn.edu.p2p.core.TransferSession;
 
-/** Single-file direct TLS demo. Passwords are never accepted as command-line values. */
+/** Single-file direct or relayed TLS demo. Passwords are never accepted as command-line values. */
 public final class CliApplication {
     private CliApplication() {}
 
@@ -34,19 +34,27 @@ public final class CliApplication {
                       fingerprint --store PATH [--alias peer] [--password-env NAME]
                       receive --store PATH --pin FULL_SHA256 --port PORT --output LOCAL_PATH [--accept|--reject]
                       send --store PATH --pin FULL_SHA256 --host HOST --port PORT --file PATH
+                      relay-server --host 127.0.0.1 --port PORT
+                      relay-receive --host RELAY --port PORT --store PATH --pin FULL_SHA256 --output PATH [--accept|--reject]
+                      relay-send --host RELAY --port PORT --code CODE --store PATH --pin FULL_SHA256 --file PATH
                     Options: --alias peer, --host 127.0.0.1, --timeout-ms 30000, --password-env NAME.
                     Supply pins only after comparison over an independent trusted channel.
                     Password defaults to console input; --password-env names an existing environment variable.
                     Use cli:installDist and the installed launcher for interactive console input.
-                    One connection/file; no relay, resume or UI. Receive never chooses a path from remote metadata.
+                    One connection/file; no resume or UI. Relay code is routing only, never a trusted pin.
+                    Receive never chooses a path from remote metadata.
                     """);
             return;
         }
         String command = args[0];
-        if (!Set.of("fingerprint", "receive", "send").contains(command)) {
+        if (!Set.of("fingerprint", "receive", "send", "relay-server", "relay-receive", "relay-send").contains(command)) {
             throw new IllegalArgumentException("Unknown command");
         }
         Map<String, String> options = parse(args);
+        if (command.equals("relay-server")) {
+            RelayCommands.server(options);
+            return;
+        }
         char[] password = password(options);
         PeerNode node;
         try {
@@ -69,8 +77,12 @@ public final class CliApplication {
             throw new IllegalArgumentException("Invalid port");
         }
         var address = new InetSocketAddress(options.getOrDefault("--host", "127.0.0.1"), port);
+        if (command.startsWith("relay-")) {
+            RelayCommands.transfer(command, options, node, address, timeout, pin);
+            return;
+        }
         if (command.equals("receive")) {
-            Path destination = Path.of(required(options, "--output"));
+            required(options, "--output");
             if (options.containsKey("--accept") && options.containsKey("--reject")) {
                 throw new IllegalArgumentException("Conflicting decision flags");
             }
@@ -78,23 +90,7 @@ public final class CliApplication {
                 System.out.println("LISTENING " + listener.port());
                 try (var session = listener.accept()) {
                     verify(session, pin);
-                    var offer = session.receiveOffer();
-                    System.out.println("OFFER " + offer.transferId() + " name=" + offer.fileName()
-                            + " bytes=" + offer.size() + " SHA-256=" + offer.sha256());
-                    boolean accepted = options.containsKey("--accept");
-                    if (!accepted && !options.containsKey("--reject")) {
-                        var console = System.console();
-                        if (console == null) {
-                            throw new IOException("Interactive approval requires console or explicit --accept/--reject");
-                        }
-                        accepted = "y".equalsIgnoreCase(console.readLine("Receive into chosen local path? [y/N] "));
-                    }
-                    if (!accepted) {
-                        session.reject(offer.transferId());
-                        System.out.println("REJECTED");
-                        return;
-                    }
-                    result(session.accept(offer.transferId(), destination, CliApplication::progress));
+                    RelayCommands.receive(session, options);
                 }
             }
         } else {
@@ -106,7 +102,7 @@ public final class CliApplication {
         }
     }
 
-    private static void verify(TransferSession session, String pin) throws IOException {
+    static void verify(TransferSession session, String pin) throws IOException {
         var pending = session.info();
         System.out.println("PENDING_VERIFICATION " + pending.sessionId() + " (TCP only)");
         var verified = session.verify(pending.sessionId(), pin);
@@ -114,12 +110,12 @@ public final class CliApplication {
                 + " REMOTE SHA-256: " + verified.remoteFingerprint().orElseThrow());
     }
 
-    private static void progress(TransferProgress value) {
+    static void progress(TransferProgress value) {
         System.out.println(value.state() + " " + value.transferId()
                 + " " + value.bytesTransferred() + "/" + value.totalBytes());
     }
 
-    private static void result(TransferResult result) {
+    static void result(TransferResult result) {
         System.out.println("SUCCESS bytes=" + result.bytes() + " SHA-256=" + result.sha256());
     }
 
@@ -142,7 +138,7 @@ public final class CliApplication {
         return value;
     }
 
-    private static String required(Map<String, String> options, String key) {
+    static String required(Map<String, String> options, String key) {
         String value = options.get(key);
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException("Missing option");
@@ -153,7 +149,7 @@ public final class CliApplication {
     private static Map<String, String> parse(String[] args) {
         var options = new HashMap<String, String>();
         Set<String> values = Set.of("--store", "--alias", "--pin", "--host", "--port", "--output",
-                "--file", "--timeout-ms", "--password-env");
+                "--file", "--timeout-ms", "--password-env", "--code");
         for (int i = 1; i < args.length; i++) {
             String key = args[i];
             String value;

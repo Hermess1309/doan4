@@ -1,6 +1,6 @@
 # Nền tảng bảo mật M2
 
-M2 cung cấp identity/kênh TLS; M3 đã tích hợp vào core và CLI truyền file localhost (xem CORE_API.md/DEMO.md). Chưa có P2pEngine async đầy đủ hoặc relay server. Không chỉnh desktop. Hướng dẫn này mô tả đúng API hiện tại, không hứa một kênh đã xác thực khi người dùng chưa kiểm tra fingerprint.
+M2 cung cấp identity/kênh TLS; M3 đã tích hợp vào core và CLI truyền file localhost (xem CORE_API.md/DEMO.md). M6 có relay TCP opaque (RELAY.md), vẫn dùng nguyên crypto M2; chưa có P2pEngine async đầy đủ. Không chỉnh desktop. Hướng dẫn này mô tả đúng API hiện tại, không hứa một kênh đã xác thực khi người dùng chưa kiểm tra fingerprint.
 
 ## Tạo identity trên Windows với JDK 21
 

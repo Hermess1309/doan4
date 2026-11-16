@@ -123,3 +123,8 @@ Windows->Windows làm tương tự với receiver bind LAN và host IP đúng. C
 Desktop Ubuntu: chạy ./desktop/build/install/desktop/bin/desktop trong desktop session X11/XWayland có display và fonts; --smoke-test chỉ kiểm tra khởi tạo khi implementation UI có mặt. Branch Codex hiện là placeholder, UI thật thuộc Antigravity và cần review/tích hợp rồi kiểm thử cửa sổ, file chooser, EDT và transfer thật. Không chỉnh desktop trong task phạm vi này.
 
 Relay hai mạng: chờ M6 triển khai signaling/byte tunnel và CLI/API relay rồi thêm lệnh demo cụ thể. Không giả lập một lệnh connectRelay đã chạy khi chưa có backend; đây vẫn là tiêu chí bắt buộc, TLS kết thúc ở peer, pinning và SHA-256 giữ nguyên.
+
+
+## M6 — Relay
+
+Lệnh relay-server/relay-receive/relay-send, pairing, strict pinning/TLS và điều kiện public server tại [RELAY](RELAY.md). Demo direct bên trên giữ nguyên. Localhost không chứng minh truyền qua Internet hoặc hai OS thật.

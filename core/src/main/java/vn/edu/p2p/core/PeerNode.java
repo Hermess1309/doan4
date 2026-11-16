@@ -49,6 +49,30 @@ public final class PeerNode {
         return new PeerListener(this, address, acceptTimeoutMillis, ioTimeoutMillis);
     }
 
+    /** TLS role is independent of which side established the outbound TCP connection. */
+    public enum TlsRole { CLIENT, SERVER }
+
+    /**
+     * Takes exclusive ownership of an already connected transport, including on failure.
+     * The result is TCP-only and pending verification; call verify with an independent pin.
+     * Never retain/read/write the socket after handoff. All operations are blocking.
+     */
+    public TransferSession attach(Socket socket, TlsRole role, int ioTimeoutMillis) throws IOException {
+        java.util.Objects.requireNonNull(socket);
+        try {
+            java.util.Objects.requireNonNull(role);
+            return prepare(socket, role == TlsRole.CLIENT
+                    ? PeerTlsSession.Role.CLIENT : PeerTlsSession.Role.SERVER, ioTimeoutMillis);
+        } catch (IOException | RuntimeException failure) {
+            try {
+                socket.close();
+            } catch (IOException closing) {
+                failure.addSuppressed(closing);
+            }
+            throw failure;
+        }
+    }
+
     TransferSession prepare(Socket socket, PeerTlsSession.Role role, int timeout) throws IOException {
         return new TransferSession(PeerTlsSession.prepare(socket, identity, role, timeout));
     }

@@ -4,7 +4,7 @@
 
 Sinh viên làm cá nhân trong 15 ngày làm việc, 3–4 giờ/ngày (45–60 giờ), có Codex phụ trách backend và Antigravity phụ trách desktop. Mục tiêu bắt buộc: CLI/desktop và demo truyền file thật trên Windows 10/11 và Ubuntu Linux, có test và bằng chứng bảo mật. macOS ngoài phạm vi MVP 15 ngày; CI chỉ Windows/Ubuntu.
 
-M0–M2 đã hoàn tất; M3 hiện thực truyền một file thật qua TLS 1.3 và CLI localhost. Resume, relay và UI tích hợp vẫn chưa triển khai. Không tự chuyển sang M4.
+M0–M3 đã hoàn tất trên backend; M6-MVP (ưu tiên trước M4) bổ sung TCP relay có giới hạn và truyền file qua TLS 1.3 đầu cuối. Resume và UI tích hợp chưa triển khai trong branch này; public Internet và demo hai OS còn chờ nghiệm thu. Xem RELAY.md; không tự chuyển sang M4.
 
 ## Kiến trúc
 
@@ -146,4 +146,8 @@ CI hiện dùng đúng ubuntu-latest và windows-latest, build/test, tạo appli
 
 Ghi chính xác phiên bản OS/JDK, commit, hướng truyền, size, fingerprint public, TLS protocol/cipher, SHA-256 nguồn/đích và kết quả; không lưu password/private key/file content. Bao phủ file 0 byte, text UTF-8, binary nhiều chunk, 10–100 MiB; bài lớn riêng khi có tài nguyên. Windows 10 và 11 đều phải được ghi nhận khi tuyên bố đã kiểm thử hai phiên bản.
 
-M3 đã có localhost integration/CLI demo và CI, **chưa có bằng chứng truyền file giữa hai máy** cho các hàng trên. Relay chưa được triển khai; vẫn là yêu cầu bắt buộc M6, không cắt relay, E2E TLS hoặc fingerprint để rút phạm vi. GUI Ubuntu thật phải kiểm tra trên desktop session sau khi tích hợp branch Antigravity; headless/launcher placeholder không thay thế kiểm thử GUI.
+M3 đã có localhost integration/CLI demo và CI, **chưa có bằng chứng truyền file giữa hai máy** cho các hàng trên. Ở thời điểm M3 relay chưa được triển khai; M6 nay có relay localhost theo RELAY.md, demo public/hai máy vẫn chưa được chứng minh. Không cắt relay, E2E TLS hoặc fingerprint để rút phạm vi. GUI Ubuntu thật phải kiểm tra trên desktop session sau khi tích hợp branch Antigravity; headless/launcher placeholder không thay thế kiểm thử GUI.
+
+## Relay M6-MVP — socket handoff
+
+M6 được ưu tiên trước M4 theo yêu cầu người dùng. Giữ nguyên M2/M3: relay chỉ routing và byte forwarding, hai peer pin chứng chỉ độc lập và mutual TLS 1.3 trước OFFER. Core bổ sung `PeerNode.TlsRole { CLIENT, SERVER }` và `attach(Socket, TlsRole, int ioTimeoutMillis)` nhận quyền sở hữu socket đã kết nối (kể cả khi thất bại), trả TransferSession PENDING_VERIFICATION. Không expose crypto types, không thêm dependency core -> relay; CLI gọi RelayClient rồi handoff vào core. Vai trò CREATE/receiver là TLS SERVER, JOIN/sender là TLS CLIENT; cả hai TCP đều outbound. Desktop không sửa trong M6.

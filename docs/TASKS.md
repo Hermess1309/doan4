@@ -12,7 +12,7 @@ Phạm vi hiện hành sau M3: Windows 10/11 và Ubuntu Linux; CI chỉ ubuntu-l
 | 4–5 | M3 | Offer/accept/reject, streaming/chunk, hash, progress API | PASS Windows + CLI + 1 GiB; chờ review |
 | 6 | M4 | Cancel, disconnect, resume an toàn và negative tests | Chưa bắt đầu |
 | 7 | M5 | Demo LAN hai peer, timeout và lỗi filesystem | Chưa bắt đầu |
-| 8–9 | M6 | Pairing, relay byte hai chiều, TLS xuyên relay | Chưa bắt đầu |
+| Ưu tiên trước M4 | M6-MVP | Pairing, byte relay có giới hạn, TLS end-to-end, CLI/file/hash | PASS Windows localhost; chờ public/hai OS thật |
 | 10–12 | M7 | Ổn định backend, hỗ trợ Antigravity tích hợp API | Chưa bắt đầu |
 | 13 | M8 | Chạy demo/test thực Windows và Linux, lưu bằng chứng | Chưa bắt đầu |
 | 14 | M9 | Benchmark, kiểm chứng E2E và negative tests bảo mật | Chưa bắt đầu |
@@ -148,3 +148,41 @@ Trạng thái hiện tại: chỉ có Windows localhost CLI demo, localhost inte
 ```
 
 PASS: clean build/Spotless, 54 task thực thi; XML 106 case = 105 PASS, 0 failure/error, 1 SKIP có chủ đích cho 1 GiB (bài này đã chạy riêng ở M3, không lặp lại vì không đổi source). Hai launcher Windows exit 0. Desktop tại branch Codex in placeholder; không tuyên bố đã kiểm thử GUI thật. Source/build dependency/toolchain không đổi, không có private key/secret/artifact trong phạm vi thay đổi. CI hai OS sau push được báo theo commit; các demo hai host/relay/GUI thật vẫn pending đúng checklist.
+
+## M6-MVP — Relay trước Resume (2026-11-16)
+
+Preflight: origin/main thực tế M0 b2853d2, backend origin/feat/core-network 34bcfb8, desktop b84df72, PR #1/#2 chưa merge. Người dùng cho phép tạo feat/relay-mvp từ origin/main rồi tích hợp đầy đủ backend bằng git merge --ff-only origin/feat/core-network. Worktree riêng C:\Users\PC\Documents\Study\Do_an_4-relay. Toàn bộ M0–M3 là ancestor; không cherry-pick, không sửa/merge/push main hoặc desktop, không merge PR. Worktree chính đang được công việc tích hợp khác sử dụng, không chỉnh trong M6.
+
+Baseline trước relay: clean spotlessCheck build PASS, 106 cases = 105 PASS, 1 optional SKIP, 0 failure/error. Không conflict hoặc lỗi nền tảng ngăn triển khai M6.
+
+Thêm RelayProtocol, RelayConfig, RelayServer, RelayClient/Pending, Core PeerNode.attach/TlsRole, CLI RelayCommands và ba bộ test M6. Không đổi dependency/build/CI/crypto/desktop/UI_SPEC. Giới hạn, ownership/socket handoff, routing protocol và lệnh Windows/Ubuntu ở RELAY.md/CORE_API.md; SPEC/DECISIONS/AGENTS/README/SECURITY/DEMO cập nhật trạng thái. Không triển khai M4.
+
+Lệnh đã chạy thực trên Windows 11 / Temurin 21.0.13+9, Gradle 9.2.1 với JDK/cache portable ở mục M1:
+
+```powershell
+.\gradlew.bat --offline --no-daemon --console=plain :protocol:test :relay:test :cli:test
+.\gradlew.bat --offline --no-daemon --console=plain spotlessApply
+.\gradlew.bat --offline --no-daemon --console=plain clean spotlessCheck build :cli:installDist
+```
+
+Clean build bản cuối PASS (53 tasks), 133 cases = 132 PASS, 0 failure/error, 1 SKIP có chủ đích (optional direct 1 GiB cũ). M6 bổ sung 27 ca PASS: protocol 3, relay 12, CLI integration 12. M1–M3 giữ nguyên tests và đều pass. XML/HTML trong các module build/test-results/test và build/reports/tests/test; log local ignored .tools/m6/final-clean-build.log.
+
+Ca disconnect đầu tiên FAIL vì fixture dùng progress cuối file, relay đóng sau khi receiver đã có đủ bytes; không thể yêu cầu chắc chắn không publish ở điểm đó (giới hạn ACK M3). Đã sửa fixture TCP WireTap cắt khi khoảng 128 KiB trước đủ file 1 MiB; test PASS sender/receiver failure, không final/part, thu hồi connection. Không xóa test hoặc thay đổi core completion policy. Review thêm khóa host-output chống JOIN sớm interleave control reply và test tương ứng PASS.
+
+Bằng chứng stdout từ test bản cuối (chỉ trạng thái/PID/size/hash, không code/secret/file content):
+
+```text
+RELAY E2E PASS size=0 protocol=TLSv1.3 SHA-256=E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855 wireBytes=6642 plaintextMarkerAbsent=true
+RELAY E2E PASS size=61 protocol=TLSv1.3 SHA-256=D2A606A9075BA4066C0F491166E183917958339DCEF24D96A18D60CD5289C8FD wireBytes=6811 plaintextMarkerAbsent=true
+RELAY E2E PASS size=131199 protocol=TLSv1.3 SHA-256=7F1683806FB1DA37117D34F82805E3006CF08F2FB1DA4E2B788E97B6FAA8607D wireBytes=138425 plaintextMarkerAbsent=true
+RELAY E2E PASS size=1048576 protocol=TLSv1.3 SHA-256=3A7C168BED5319996EA095EEAD3282483DF2B5F45B038B4BE5E71426DC69C76D wireBytes=1059346 plaintextMarkerAbsent=true
+THREE JVM PASS relayPid=22696 senderPid=25520 receiverPid=27296 size=61 TLSv1.3 SHA-256=D2A606A9075BA4066C0F491166E183917958339DCEF24D96A18D60CD5289C8FD
+THREE JVM PASS relayPid=13672 senderPid=13340 receiverPid=31024 size=1048576 TLSv1.3 SHA-256=3A7C168BED5319996EA095EEAD3282483DF2B5F45B038B4BE5E71426DC69C76D
+THREE JVM NEGATIVE PASS wrong pin: no offer, no destination
+```
+
+Test WireTap chỉ trong test, capture bounded 2 MiB ở TCP relay link: marker plaintext không xuất hiện, actual TLSv1.3 và certificate pin hai endpoint được assert; source/destination byte-for-byte và SHA-256 khớp. Relay sản phẩm không có JSSE, private key hoặc file decoder, chỉ buffer 16 KiB mỗi chiều. Marker absence không được dùng một mình như bằng chứng mật mã.
+
+Ba JVM thật chạy relay + receiver + sender với identity tạm riêng; hai ca 61 B/1 MiB exit 0 và success hai bên. Ca wrong-pin subprocess exit 2 hai phía, không offer/no destination. Unit/integration còn kiểm tra mã sai/hết hạn/đã dùng, rate/session/socket limits, malformed/partial/truncated metadata, shared idle/lifetime/backpressure, pending gate và ngắt mạng/cleanup. Password/cert sinh trong @TempDir, không phụ thuộc máy cá nhân, không secrets trong output.
+
+Chưa kiểm thử public Internet/NAT, Windows 10 thực, Ubuntu thực hoặc truyền giữa hai host; CI sau push được báo riêng theo SHA. Chưa đo peak RAM/benchmark, chưa thử 1 GiB qua relay, chưa tích hợp UI hoặc resume. Pending host ngắt có thể giữ tài nguyên tới TTL 120 s; idle 60 s/lifetime 15 phút là giới hạn MVP có thể làm file/hash/chờ người dùng lâu bị ngắt. Điều kiện VPS/public TCP và kế hoạch demo Windows<->Ubuntu/Windows<->Windows/hai mạng tại RELAY.md. Không suy diễn demo thực từ CI.

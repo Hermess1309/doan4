@@ -38,7 +38,7 @@ Core không có event dispatcher/background thread riêng. Các thao tác blocki
 | rejectTransfer(id, reason) | reject(id); reason chỉ hiển thị cục bộ, wire REJECT không gửi nội dung tùy ý |
 | disconnect(sessionId) | close session và listener tương ứng, bỏ reference/map; không áp dụng trạng thái VERIFIED cũ cho session mới |
 | cancelTransfer / resumeTransfer | M4 chưa có. close chỉ ngắt connection, không có resume/ack cancel hay hủy tức thời disk hashing; không bật nút như tính năng đã hoàn tất |
-| connectRelay | M6 chưa có; không cung cấp stub báo thành công |
+| connectRelay | M6 có RelayClient ở adapter CLI và PeerNode.attach; desktop adapter vẫn do Antigravity triển khai, không có stub báo thành công |
 | Progress / completion | Callback trên worker, adapter SwingUtilities.invokeLater; chỉ state COMPLETED là thành công, không suy ra từ bytes == total |
 | Error handling | IOException biểu thị network/protocol/storage/integrity failure; TransferRejectedException là user từ chối. Adapter chuyển sang FAILED/REJECTED, không cần import protocol/crypto |
 
@@ -49,3 +49,9 @@ Callback progress TRANSFERRING giới hạn khoảng 100 ms (vẫn phát 0 và m
 Sender chỉ nhận TransferResult sau COMPLETE phản hồi có đúng ID/size/hash; receiver chỉ ACK sau file tạm đã hash lại và công bố thành tên đích. Nếu ACK mất sau publication, receiver có thể đã có file hợp lệ trong khi sender báo lỗi: không có exactly-once/distributed commit ở M3. Không tự retry/ghi đè/resume để che trạng thái không chắc chắn; người dùng kiểm tra file/SHA-256 rồi quyết định.
 
 Phân công không đổi: Antigravity sửa desktop/UI_SPEC và adapter, Codex sửa core/backend. Tài liệu này thông báo API mới; chưa có RealCoreApiAdapter được nối trong branch Codex.
+
+## M6 — handoff transport vào Core
+
+PeerNode.TlsRole.CLIENT/SERVER và attach(Socket, TlsRole, int ioTimeoutMillis) nhận quyền sở hữu socket đã kết nối, kể cả khi tham số/prepare thất bại. Không giữ reference để đọc/ghi socket sau attach. Trả TransferSession PENDING_VERIFICATION; các phương thức info/verify/send/receiveOffer/accept/reject không đổi. Role TLS không dựa vào TCP initiator: receiver CREATE dùng SERVER, sender JOIN dùng CLIENT dù cả hai TCP outbound. Pin độc lập phải có trước handshake.
+
+Core không phụ thuộc relay; CLI dùng RelayClient.create/awaitPair hoặc join rồi attach. Public socket API là boundary cho adapter tương lai, không thêm relay stub hoặc desktop dependency trong task này. Tất cả blocking I/O chạy worker, đóng pending ticket/session để từ chối/hủy, UUID verification chỉ đúng phiên. Xem RELAY.md về ownership, thời hạn, rate-limit, lệnh và giới hạn bảo mật. Không thay API M3 hiện có hoặc triển khai P2pEngine/Resume.

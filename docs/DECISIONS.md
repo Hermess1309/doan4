@@ -85,3 +85,11 @@ CI tạo cả CLI/desktop distributions, smoke launcher Unix/.bat; Ubuntu có Xv
 Đã rà chỉ đọc source branch feat/desktop-ui: Swing/FlatLaf/JDK, không thấy command/API Windows riêng; DesktopApplication có --smoke-test và nhánh headless tường minh. Branch Codex hiện vẫn chứa desktop placeholder, không merge/chỉnh desktop/UI_SPEC. Ubuntu GUI thực và adapter transfer sau tích hợp vẫn phải nghiệm thu; Xvfb/CI không thay thế desktop session thật.
 
 Giữ đủ bốn kịch bản Windows->Ubuntu, Ubuntu->Windows, Windows->Windows, hai mạng qua relay, với TLS1.3/pin/SHA-256 mỗi lần. Relay tiếp tục M6, không bị giảm phạm vi. Dùng NTFS/ext4 hoặc filesystem đã xác minh hard-link no-replace; không thêm fallback ghi đè hoặc thay security model M2/M3.
+
+## D014 — M6 trước Resume, relay TCP opaque và API attach (2026-11-16)
+
+Người dùng ưu tiên relay trước M4; origin/main thực tế còn M0, đã cho phép tạo feat/relay-mvp từ origin/main rồi fast-forward toàn bộ origin/feat/core-network. Không cherry-pick, không sửa main/desktop, không merge PR. Baseline clean spotlessCheck build PASS: 105 PASS, 1 optional skip, 0 lỗi.
+
+Dùng metadata protocol P2R1 riêng trước TLS, code ngẫu nhiên 60 bit, TTL và one-shot routing; code không phải identity/key. Sau paired chỉ copy byte hữu hạn, không TLS termination. Bổ sung PeerNode.attach(Socket,TlsRole,int) để dùng nguyên TransferSession M3 và strict pre-pin M2, không tạo hệ thống truyền file thứ hai. Pending ticket/connection có deadline, giới hạn phiên/kết nối, rate-limit theo IP và toàn cục. Thất bại đóng hai đầu; không resume/half-close. Giới hạn MVP/định dạng/lệnh chi tiết ở RELAY.md.
+
+M6 diff vượt mục tiêu mềm 500 dòng vì giới hạn tài nguyên/rate-limit, socket ownership, CLI và negative/subprocess/ciphertext tests thuộc cùng milestone được yêu cầu; không thêm dependency hoặc phạm vi M4. Ghi control reply của host dưới khóa riêng, không giữ khóa toàn server khi I/O, tránh JOIN sớm xen PAIRED vào CREATED/TTL.
