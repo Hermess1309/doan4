@@ -5,7 +5,7 @@
 | Ngày | Mốc | Đầu ra và kiểm chứng | Trạng thái |
 | --- | --- | --- | --- |
 | 1 | M0 | Khung, tài liệu, 6 smoke test, CI 3 OS | Xong cục bộ; CI chưa chạy |
-| 2 | M1 | Frame/codec; bounded length, partial read/EOF, malformed input | Chưa bắt đầu |
+| 2 | M1 | Frame/codec; bounded length, partial read/EOF, malformed input | Build/test Windows PASS; chờ review |
 | 3 | M2 | Identity, TLS 1.3, pinning hai chiều, negative tests | Chưa bắt đầu |
 | 4–5 | M3 | Offer/accept/reject, streaming/chunk, hash, progress API | Chưa bắt đầu |
 | 6 | M4 | Cancel, disconnect, resume an toàn và negative tests | Chưa bắt đầu |
@@ -51,3 +51,25 @@ Lần build đầu FAIL ở Spotless do newline thừa cuối một số file, t
 Đã đối chiếu SHA-256 Wrapper JAR và kiểm tra ignore cho `.tools/`, `.gradle/`, build output, `.env`, keystore. Không coi workflow là bằng chứng đã chạy Ubuntu/macOS; GitHub Actions chưa chạy, không có push. Smoke test M0 chỉ xác minh class/module và runtime Java 21, không chứng minh mạng hoặc bảo mật. Chưa kiểm thử UI, LAN, TLS, relay hoặc truyền file vì chưa triển khai.
 
 Các kiến thức cần bảo vệ M0: dependency một chiều và `implementation`; toolchain so với `--release`; TCP là byte stream nên tương lai cần frame và partial-read handling; TLS endpoint khác TCP relay; fingerprint cần kênh độc lập; CI matrix khác kiểm thử thực trên hai máy.
+
+## M1 — Protocol framing (2026-11-16)
+
+Yêu cầu M1 được người dùng cho phép tiếp sau M0; chỉ sửa protocol và tài liệu backend. Worktree bắt buộc: `C:\Users\PC\Documents\Study\Do_an_4-codex`, branch `feat/core-network`. Không sửa desktop/UI_SPEC, crypto, relay hoặc build system.
+
+Đã thêm MessageType, Message, FrameCodec, ProtocolException và unit tests; giữ nguyên smoke test M0. Các trường hợp test: wire vector, mọi type, empty payload, defensive copy, một byte mỗi lần đọc, nhiều frame liên tiếp, EOF tại từng byte, length unsigned sai/oversize, version/type sai trước payload, đúng giới hạn, trailing bytes, lỗi read/write và quyền sở hữu stream. Chưa triển khai/test TLS, socket timeout, file transfer, resume hoặc UI.
+
+Đã chạy thực trên Windows 11 amd64, Temurin JDK 21.0.13+9, Gradle 9.2.1:
+
+```powershell
+Set-Location 'C:\Users\PC\Documents\Study\Do_an_4-codex'
+$env:JAVA_HOME = 'C:\Users\PC\Documents\Study\Do_an_4\.tools\jdk21\jdk-21.0.13+9'
+$env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
+$env:GRADLE_USER_HOME = 'C:\Users\PC\Documents\Study\Do_an_4\.tools\gradle-home'
+.\gradlew.bat --offline --no-daemon --console=plain :protocol:test
+.\gradlew.bat --offline --no-daemon --console=plain :spotlessApply :protocol:spotlessApply
+.\gradlew.bat --offline --no-daemon --console=plain clean spotlessCheck build
+```
+
+Kết quả: protocol 42/42 test PASS (41 ca M1 + 1 smoke M0); toàn bộ dự án 47/47 PASS, 0 skipped/failure/error. Clean build và Spotless PASS, 52 task thực thi. XML/HTML tại `<module>/build/test-results/test/` và `<module>/build/reports/tests/test/`. Không thay logic test cũ hoặc build system. Chưa tuyên bố M1 pass trên Linux/macOS tại thời điểm ghi log local này; CI sau push được báo riêng theo commit.
+
+Kiến thức bảo vệ M1: TCP không giữ ranh giới message; length prefix và readFully; phân biệt EOF sạch với truncation; big-endian và unsigned u32 trong Java; giới hạn trước cấp phát; lỗi giữa frame phải đóng stream; framing không thay thế TLS, xác minh peer hoặc validation payload/state.

@@ -4,7 +4,7 @@
 
 Sinh viên làm cá nhân trong 15 ngày làm việc, 3–4 giờ/ngày (45–60 giờ), có Codex phụ trách backend và Antigravity phụ trách desktop. Mục tiêu: demo truyền file thực trên Windows và Linux, có test và bằng chứng kiểm chứng bảo mật. macOS là nền tảng CI build, chưa phải cam kết demo.
 
-M0 chỉ tạo khung dự án. Tất cả hành vi mạng, bảo mật và truyền file bên dưới là yêu cầu tương lai, chưa được triển khai hoặc kiểm chứng. Không tự làm M1 khi xong M0.
+M0 đã hoàn tất scaffold. M1 triển khai binary framing theo yêu cầu mới; các hành vi TLS, truyền file và relay bên dưới vẫn là yêu cầu tương lai, chưa triển khai. Không tự chuyển sang M2.
 
 ## Kiến trúc
 
@@ -64,3 +64,36 @@ Callback dự kiến cung cấp transfer ID, state, bytes đã xử lý, tổng 
 Cho phép Java 21, Gradle Wrapper, Socket/ServerSocket/NIO, JSSE, TLS 1.3, SHA-256, JUnit 5, Spotless, Swing/FlatLaf. JmDNS ưu tiên thấp. Thư viện khác cần giải thích và người dùng đồng ý trước khi thêm.
 
 Loại khỏi MVP: NAT hole punching, STUN/TURN, tài khoản/cloud storage, mã hóa tự chế, nhiều transfer song song. Hàng đợi nhiều file chỉ làm khi còn thời gian. Cắt JmDNS, lịch sử, animation và chức năng phụ trước khi giảm bảo mật.
+
+## Wire contract M1 — version 1
+
+Đây là phần chốt framing được giao ở D007, không bổ sung chức năng truyền file hay thay đổi yêu cầu bảo mật. Payload hiện là byte array opaque; schema metadata/chunk và kiểm tra trạng thái thuộc M3/M4. Module khác không được coi payload tùy ý là một offer/resume hợp lệ.
+
+| Offset | Trường | Quy tắc |
+| --- | --- | --- |
+| 0–3 | bodyLength | u32 big-endian, tính version + type + payload, không tính 4 byte prefix |
+| 4 | version | u8, hiện chỉ chấp nhận 1 |
+| 5 | type | u8, ID cố định theo bảng dưới |
+| 6… | payload | bodyLength - 2 byte, giữ nguyên nội dung binary |
+
+Giới hạn bodyLength: 2 đến 1.048.576 byte (1 MiB), payload tối đa 1.048.574 byte. Dùng long để kiểm tra length unsigned trước khi cấp phát payload, kể cả 0x80000000 và 0xffffffff. Validate version/type trước cấp phát. Chunk file 64 KiB vẫn là mục tiêu M3; giới hạn frame không phải kích thước file.
+
+| ID | MessageType | Ý nghĩa dành cho milestone tiếp theo |
+| --- | --- | --- |
+| 1 | OFFER | Đề nghị truyền một file |
+| 2 | ACCEPT | Chấp nhận offer |
+| 3 | REJECT | Từ chối offer |
+| 4 | CHUNK | Một phần dữ liệu file |
+| 5 | COMPLETE | Sender kết thúc dữ liệu; chưa chứng minh receiver kiểm tra hash thành công |
+| 6 | CANCEL | Hủy transfer |
+| 7 | RESUME_REQUEST | Yêu cầu resume; chưa bật chức năng ở M1 |
+| 8 | RESUME_RESPONSE | Phản hồi resume; chỉ hợp lệ sau kiểm tra an toàn M4 |
+| 9 | ERROR | Báo lỗi ứng dụng |
+
+Public API protocol: `MessageType.id()/fromId(int)`, `Message(type, payload)` với defensive copy, `FrameCodec.encode/decode` cho đúng một frame byte array và `FrameCodec.write/read` cho stream nhiều frame. Không có Java object serialization, Swing, socket, TLS hoặc relay trong codec. Public API core không thay đổi; desktop tiếp tục chỉ gọi core.
+
+`read(InputStream)` trả Optional.empty chỉ khi EOF trước byte đầu frame; EOF giữa header/payload ném EOFException. Length/version/type sai hoặc trailing bytes trong `decode(byte[])` ném ProtocolException (IOException). Lỗi stream I/O được truyền nguyên cho caller. Không bỏ qua frame lỗi hoặc cố resync: caller phải hủy kết nối sau lỗi, kể cả timeout giữa frame. `read` tiêu thụ đúng một frame, không dùng available() để quyết định dữ liệu TCP đã đủ.
+
+Chỉ hỗ trợ blocking InputStream/OutputStream; readFully xử lý partial read. Blocking OutputStream.write hoàn thành dữ liệu được yêu cầu hoặc ném lỗi; chưa cung cấp NIO channel API. Caller cấu hình timeout, đồng bộ truy cập chung stream, flush khi phù hợp và đóng tài nguyên. Codec không tự close/flush và không có state chung. Mỗi frame có bộ nhớ hữu hạn (gồm các bản sao defensive), không tải toàn bộ file vào RAM.
+
+Codec không cung cấp mã hóa/xác thực, kiểm tra tên file, hash hoặc thứ tự state machine. Chỉ được dùng cho dữ liệu file sau xác minh peer/TLS theo SPEC. Ví dụ OFFER payload ASCII "AB": `00 00 00 04 01 01 41 42`; đây chỉ là ví dụ framing, không phải schema offer hợp lệ của M3.

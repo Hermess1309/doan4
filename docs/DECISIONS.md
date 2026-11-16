@@ -37,3 +37,13 @@ Progress callback của core chạy trên worker, UI marshal sang EDT; cần ch�
 ## D008 — Tính khả thi 15 ngày (chấp nhận)
 
 Ưu tiên một file/phiên, đường dẫn đích do receiver chọn, không ghi đè, SHA-256 trước completion. Cắt discovery, lịch sử, animation, hàng đợi nếu thiếu thời gian. CI kiểm tra 3 OS; demo sản phẩm bắt buộc Windows/Linux. Chỉ ghi pass khi có lệnh/kết quả thực tế; M0 không thể xác minh tính an toàn của thiết kế chưa có code.
+
+## D009 — Chốt binary envelope M1 (2026-11-16, triển khai theo yêu cầu M1)
+
+Hoàn tất phần framing còn mở tại D007: u32 big-endian body length, u8 version=1, u8 type, payload opaque; body tối đa 1 MiB, tối thiểu 2 byte. Không dùng magic/checksum tự chế: các lỗi cấu trúc bị từ chối, xác thực/toàn vẹn do TLS M2 đảm nhiệm. Không hỗ trợ tự resync sau lỗi.
+
+Chọn 9 ID tường minh theo hành vi SPEC: OFFER/ACCEPT/REJECT/CHUNK/COMPLETE/CANCEL/RESUME_REQUEST/RESUME_RESPONSE/ERROR. Không dùng enum ordinal; không thêm pairing/relay messages ở M1. Wire table và API chi tiết tại SPEC. Payload schema và state validation được trì hoãn đúng M3/M4, không mở chức năng resume sớm. Thay đổi wire contract sau này cần quyết định/version phù hợp.
+
+Chọn blocking stream API đơn giản cho MVP: encode/decode byte array hoặc write/read một frame trên stream; Optional.empty biểu thị EOF sạch, EOFException biểu thị frame bị cắt. ProtocolException kế thừa IOException; caller đóng connection sau mọi lỗi đọc/ghi. Không tự close/flush stream để adapter quản lý buffer và tài nguyên. Length unsigned được kiểm tra bằng long trước cấp phát payload; version/type cũng được kiểm tra trước cấp phát. Mỗi payload có defensive copy và giới hạn hữu hạn.
+
+D007 còn mở timeout socket, schema metadata/chunk, nguồn file thay đổi và API progress của core; không coi những phần đó đã được triển khai. Không thay public API core hoặc thêm dependency/build plugin.
