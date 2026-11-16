@@ -6,6 +6,7 @@ import com.formdev.flatlaf.FlatLightLaf;
 import java.awt.Component;
 import java.awt.Window;
 import javax.swing.SwingUtilities;
+import vn.edu.p2p.desktop.model.AppSettings;
 
 /**
  * Quản lý chủ đề FlatLaf (Dark / Light) và cập nhật giao diện thời gian thực.
@@ -32,21 +33,28 @@ public final class ThemeManager {
     private ThemeManager() {}
 
     /**
-     * Khởi tạo theme mặc định khi ứng dụng khởi động.
+     * Khởi tạo theme dựa theo cấu hình đã lưu trong AppSettings khi khởi động.
      */
     public static void initialize() {
-        FlatDarkLaf.setup();
-        currentMode = ThemeMode.DARK;
+        ThemeMode savedMode = AppSettings.getThemeMode();
+        currentMode = (savedMode != null) ? savedMode : ThemeMode.DARK;
+        if (currentMode == ThemeMode.DARK) {
+            FlatDarkLaf.setup();
+        } else {
+            FlatLightLaf.setup();
+        }
     }
 
     /**
-     * Chuyển đổi theme và cập nhật toàn bộ component trên cây giao diện.
+     * Chuyển đổi theme, lưu vào cấu hình và cập nhật toàn bộ cây component.
      */
     public static void setTheme(ThemeMode mode, Component rootComponent) {
         if (mode == currentMode) {
             return;
         }
         currentMode = mode;
+        AppSettings.setThemeMode(mode);
+
         SwingUtilities.invokeLater(() -> {
             if (mode == ThemeMode.DARK) {
                 FlatDarkLaf.setup();

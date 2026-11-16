@@ -1,12 +1,14 @@
 package vn.edu.p2p.desktop.view.screens;
 
 import java.awt.BorderLayout;
+import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
+import java.io.File;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
@@ -14,9 +16,11 @@ import javax.swing.JButton;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JProgressBar;
+import vn.edu.p2p.desktop.model.TransferViewModel;
 
 /**
  * Màn hình Transfers: Quản lý chi tiết tiến trình truyền file, tốc độ, hủy và tiếp tục (resume).
+ * Cập nhật giao diện an toàn thông qua TransferViewModel.
  */
 public class TransfersPanel extends JPanel {
 
@@ -26,10 +30,13 @@ public class TransfersPanel extends JPanel {
     private final JLabel lblSpeed;
     private final JLabel lblEta;
     private final JLabel lblState;
+    private final JLabel lblError;
     private final JProgressBar progressBar;
     private final JButton btnCancel;
     private final JButton btnResume;
     private final JButton btnOpenFolder;
+
+    private TransferViewModel currentTransfer = TransferViewModel.createIdle();
 
     public TransfersPanel() {
         setLayout(new BorderLayout(16, 16));
@@ -54,10 +61,10 @@ public class TransfersPanel extends JPanel {
         lblFileName.setFont(lblFileName.getFont().deriveFont(Font.BOLD, 14f));
         card.add(lblFileName, gbc);
 
-        // Kích thước
+        // Kích thước & Bytes đã truyền
         gbc.gridx = 0;
         gbc.gridy = 1;
-        card.add(new JLabel("Dung lượng:"), gbc);
+        card.add(new JLabel("Dung lượng đã truyền:"), gbc);
         gbc.gridx = 1;
         lblFileSize = new JLabel("0 B / 0 B");
         card.add(lblFileSize, gbc);
@@ -93,9 +100,18 @@ public class TransfersPanel extends JPanel {
         lblState.setFont(lblState.getFont().deriveFont(Font.BOLD));
         card.add(lblState, gbc);
 
-        // Progress Bar
+        // Lỗi nếu có
         gbc.gridx = 0;
         gbc.gridy = 5;
+        gbc.gridwidth = 2;
+        lblError = new JLabel("");
+        lblError.setForeground(new Color(229, 87, 83));
+        lblError.setFont(lblError.getFont().deriveFont(Font.BOLD, 12f));
+        card.add(lblError, gbc);
+
+        // Progress Bar
+        gbc.gridx = 0;
+        gbc.gridy = 6;
         gbc.gridwidth = 2;
         gbc.fill = GridBagConstraints.HORIZONTAL;
         progressBar = new JProgressBar(0, 100);
@@ -107,14 +123,14 @@ public class TransfersPanel extends JPanel {
 
         // Điều khiển (Nút bấm)
         gbc.gridx = 0;
-        gbc.gridy = 6;
+        gbc.gridy = 7;
         gbc.gridwidth = 2;
         gbc.fill = GridBagConstraints.NONE;
         JPanel actionsRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 8));
         btnCancel = new JButton("Hủy truyền");
-        btnCancel.setEnabled(false); // Chưa có tác vụ
+        btnCancel.setEnabled(false); // Disabled khi chưa có backend thật
         btnResume = new JButton("Tiếp tục (Resume)");
-        btnResume.setEnabled(false); // Chưa hỗ trợ khi chưa có phiên lỗi
+        btnResume.setEnabled(false); // Disabled khi chưa có backend M4
         btnOpenFolder = new JButton("Mở thư mục đích");
         btnOpenFolder.setEnabled(false);
 
@@ -127,6 +143,63 @@ public class TransfersPanel extends JPanel {
         container.add(Box.createVerticalGlue());
 
         add(container, BorderLayout.NORTH);
+    }
+
+    /**
+     * Cập nhật toàn bộ giao diện tiến trình dựa trên ViewModel nhận từ Presenter/Adapter.
+     */
+    public void updateTransferProgress(TransferViewModel transfer) {
+        if (transfer == null || transfer.state() == TransferViewModel.TransferState.IDLE) {
+            resetToIdle();
+            return;
+        }
+
+        this.currentTransfer = transfer;
+        lblFileName.setText(transfer.fileName());
+        lblFileSize.setText(transfer.getFormattedSizeProgress());
+        lblTransferDirection.setText(transfer.direction().getDisplayName());
+        lblSpeed.setText(transfer.getFormattedSpeed());
+        lblEta.setText("Thời gian còn lại: " + transfer.getFormattedEta());
+        lblState.setText(transfer.state().getDisplayName().toUpperCase());
+
+        int pct = transfer.getProgressPercentage();
+        progressBar.setValue(pct);
+        progressBar.setString(pct + "%");
+
+        if (transfer.errorMessage() != null && !transfer.errorMessage().isBlank()) {
+            lblError.setText("Lỗi: " + transfer.errorMessage());
+        } else {
+            lblError.setText("");
+        }
+
+        // Cập nhật trạng thái các nút theo trạng thái truyền
+        boolean isRunning = transfer.state() == TransferViewModel.TransferState.TRANSFERRING;
+        boolean isCompleted = transfer.state() == TransferViewModel.TransferState.COMPLETED;
+        boolean isFailed = transfer.state() == TransferViewModel.TransferState.FAILED;
+
+        // Lưu ý: Nút cancel/resume chỉ bật khi có phiên thật ở UI-03; ở UI-02 giữ disabled theo yêu cầu
+        btnCancel.setEnabled(false);
+        btnResume.setEnabled(false);
+        btnOpenFolder.setEnabled(isCompleted);
+    }
+
+    /**
+     * Đặt lại giao diện về trạng thái sẵn sàng ban đầu.
+     */
+    public void resetToIdle() {
+        this.currentTransfer = TransferViewModel.createIdle();
+        lblFileName.setText("(Chưa có tệp tin đang truyền)");
+        lblFileSize.setText("0 B / 0 B");
+        lblTransferDirection.setText("Không hoạt động");
+        lblSpeed.setText("0.0 KB/s");
+        lblEta.setText("Thời gian còn lại: --:--");
+        lblState.setText("SẴN SÀNG (CHỜ TỆP TIN)");
+        lblError.setText("");
+        progressBar.setValue(0);
+        progressBar.setString("0%");
+        btnCancel.setEnabled(false);
+        btnResume.setEnabled(false);
+        btnOpenFolder.setEnabled(false);
     }
 
     private JPanel createCardPanel(String title) {
@@ -156,5 +229,9 @@ public class TransfersPanel extends JPanel {
 
     public JProgressBar getProgressBar() {
         return progressBar;
+    }
+
+    public TransferViewModel getCurrentTransfer() {
+        return currentTransfer;
     }
 }

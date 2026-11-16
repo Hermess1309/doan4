@@ -9,6 +9,8 @@ import java.awt.Frame;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
+import java.awt.Toolkit;
+import java.awt.datatransfer.StringSelection;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
@@ -18,28 +20,39 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
-import javax.swing.SwingConstants;
 import vn.edu.p2p.desktop.util.Formatters;
 
 /**
  * Hộp thoại bắt buộc xác minh vân tay chứng chỉ (Certificate Fingerprint) TLS 1.3.
  * Chỉ khi người dùng đối chiếu và bấm xác nhận thì trạng thái mới chuyển sang READY.
+ * Nghiêm cấm xác nhận nếu chưa có dữ liệu thật từ backend hoặc đang ở chế độ xem trước.
  */
 public class FingerprintVerificationDialog extends JDialog {
 
     private boolean verified = false;
+    private final boolean isPreviewMode;
 
     private final JLabel lblSessionDetails;
+    private final JLabel lblPreviewWarning;
     private final JTextArea txtRemoteFingerprint;
     private final JTextArea txtLocalFingerprint;
+    private final JButton btnCopyRemote;
+    private final JButton btnCopyLocal;
     private final JButton btnVerify;
     private final JButton btnReject;
 
+    private final String rawRemoteFp;
+    private final String rawLocalFp;
+
     public FingerprintVerificationDialog(Frame owner, String sessionId, String peerAddress,
-            String remoteFingerprintRaw, String localFingerprintRaw) {
+            String remoteFingerprintRaw, String localFingerprintRaw, boolean isPreviewMode) {
         super(owner, "Xác minh Bảo mật Kết nối (TLS 1.3)", true);
-        setSize(680, 480);
-        setMinimumSize(new Dimension(560, 400));
+        this.isPreviewMode = isPreviewMode;
+        this.rawRemoteFp = (remoteFingerprintRaw != null) ? remoteFingerprintRaw : "";
+        this.rawLocalFp = (localFingerprintRaw != null) ? localFingerprintRaw : "";
+
+        setSize(700, 520);
+        setMinimumSize(new Dimension(580, 440));
         setLocationRelativeTo(owner);
         setLayout(new BorderLayout(16, 16));
 
@@ -48,7 +61,7 @@ public class FingerprintVerificationDialog extends JDialog {
         mainPanel.setBorder(BorderFactory.createEmptyBorder(16, 20, 16, 20));
 
         // 1. Cảnh báo kênh độc lập
-        JPanel warningCard = new JPanel(new BorderLayout(10, 10));
+        JPanel warningCard = new JPanel(new BorderLayout(10, 8));
         warningCard.setBorder(BorderFactory.createCompoundBorder(
                 BorderFactory.createLineBorder(new Color(229, 168, 59), 1, true),
                 BorderFactory.createEmptyBorder(10, 12, 10, 12)));
@@ -62,12 +75,21 @@ public class FingerprintVerificationDialog extends JDialog {
 
         warningCard.add(lblWarningTitle, BorderLayout.NORTH);
         warningCard.add(lblWarningText, BorderLayout.CENTER);
+
+        // Cảnh báo nếu đang là Preview Mode
+        lblPreviewWarning = new JLabel("");
+        if (isPreviewMode) {
+            lblPreviewWarning.setText("<html><b style='color:#E55753;'>[CHẾ ĐỘ XEM TRƯỚC GIAO DIỆN — KHÔNG THỰC HIỆN XÁC MINH THẬT]</b></html>");
+            warningCard.add(lblPreviewWarning, BorderLayout.SOUTH);
+        }
+
         mainPanel.add(warningCard);
-        mainPanel.add(Box.createRigidArea(new Dimension(0, 12)));
+        mainPanel.add(Box.createRigidArea(new Dimension(0, 10)));
 
         // 2. Chi tiết phiên
-        lblSessionDetails = new JLabel("Phiên kết nối: " + (sessionId != null ? sessionId : "N/A")
-                + " | Địa chỉ đối tác: " + (peerAddress != null ? peerAddress : "N/A"));
+        String sessionDisplay = (sessionId != null && !sessionId.isBlank()) ? sessionId : "Chưa có session ID";
+        String peerDisplay = (peerAddress != null && !peerAddress.isBlank()) ? peerAddress : "Chưa có đối tác";
+        lblSessionDetails = new JLabel("Phiên kết nối: " + sessionDisplay + " | Địa chỉ đối tác: " + peerDisplay);
         lblSessionDetails.setFont(lblSessionDetails.getFont().deriveFont(Font.BOLD));
         mainPanel.add(lblSessionDetails);
         mainPanel.add(Box.createRigidArea(new Dimension(0, 10)));
@@ -75,29 +97,37 @@ public class FingerprintVerificationDialog extends JDialog {
         // 3. Khối hiển thị Vân tay
         JPanel fpPanel = new JPanel(new GridBagLayout());
         GridBagConstraints gbc = new GridBagConstraints();
-        gbc.insets = new Insets(6, 6, 6, 6);
+        gbc.insets = new Insets(4, 6, 4, 6);
         gbc.fill = GridBagConstraints.BOTH;
         gbc.weightx = 1.0;
 
-        // Remote Fingerprint
+        // Remote Fingerprint Header + Copy
         gbc.gridx = 0;
         gbc.gridy = 0;
+        JPanel remoteHeader = new JPanel(new BorderLayout());
         JLabel lblRemoteTitle = new JLabel("1. Vân tay của Đối tác (Remote SHA-256 Fingerprint):");
         lblRemoteTitle.setFont(lblRemoteTitle.getFont().deriveFont(Font.BOLD));
-        fpPanel.add(lblRemoteTitle, gbc);
+        btnCopyRemote = new JButton("Sao chép");
+        remoteHeader.add(lblRemoteTitle, BorderLayout.WEST);
+        remoteHeader.add(btnCopyRemote, BorderLayout.EAST);
+        fpPanel.add(remoteHeader, gbc);
 
         gbc.gridy = 1;
-        txtRemoteFingerprint = createFingerprintArea(Formatters.formatFingerprint(remoteFingerprintRaw));
+        txtRemoteFingerprint = createFingerprintArea(Formatters.formatFingerprint(rawRemoteFp));
         fpPanel.add(new JScrollPane(txtRemoteFingerprint), gbc);
 
-        // Local Fingerprint
+        // Local Fingerprint Header + Copy
         gbc.gridy = 2;
+        JPanel localHeader = new JPanel(new BorderLayout());
         JLabel lblLocalTitle = new JLabel("2. Vân tay của Bạn (Đọc chuỗi này cho đối tác đối chiếu):");
         lblLocalTitle.setFont(lblLocalTitle.getFont().deriveFont(Font.BOLD));
-        fpPanel.add(lblLocalTitle, gbc);
+        btnCopyLocal = new JButton("Sao chép");
+        localHeader.add(lblLocalTitle, BorderLayout.WEST);
+        localHeader.add(btnCopyLocal, BorderLayout.EAST);
+        fpPanel.add(localHeader, gbc);
 
         gbc.gridy = 3;
-        txtLocalFingerprint = createFingerprintArea(Formatters.formatFingerprint(localFingerprintRaw));
+        txtLocalFingerprint = createFingerprintArea(Formatters.formatFingerprint(rawLocalFp));
         fpPanel.add(new JScrollPane(txtLocalFingerprint), gbc);
 
         mainPanel.add(fpPanel);
@@ -111,19 +141,36 @@ public class FingerprintVerificationDialog extends JDialog {
         btnVerify = new JButton("✓ Tôi đã xác thực trùng khớp");
         btnVerify.setFont(btnVerify.getFont().deriveFont(Font.BOLD));
 
+        // Quy tắc an toàn: Không cho phép bấm xác minh nếu ở Preview Mode hoặc thiếu dữ liệu
+        boolean hasValidData = sessionId != null && !sessionId.isBlank()
+                && remoteFingerprintRaw != null && !remoteFingerprintRaw.isBlank();
+        btnVerify.setEnabled(!isPreviewMode && hasValidData);
+
         btnReject.addActionListener(e -> {
             verified = false;
             dispose();
         });
 
         btnVerify.addActionListener(e -> {
-            verified = true;
-            dispose();
+            if (!isPreviewMode && hasValidData) {
+                verified = true;
+                dispose();
+            }
         });
+
+        btnCopyRemote.addActionListener(e -> copyToClipboard(rawRemoteFp));
+        btnCopyLocal.addActionListener(e -> copyToClipboard(rawLocalFp));
 
         buttonPanel.add(btnReject);
         buttonPanel.add(btnVerify);
         add(buttonPanel, BorderLayout.SOUTH);
+    }
+
+    private void copyToClipboard(String text) {
+        if (text != null && !text.isBlank()) {
+            StringSelection selection = new StringSelection(text);
+            Toolkit.getDefaultToolkit().getSystemClipboard().setContents(selection, null);
+        }
     }
 
     private JTextArea createFingerprintArea(String content) {
@@ -141,8 +188,15 @@ public class FingerprintVerificationDialog extends JDialog {
         return verified;
     }
 
-    public void updateFingerprints(String remoteRaw, String localRaw) {
-        txtRemoteFingerprint.setText(Formatters.formatFingerprint(remoteRaw));
-        txtLocalFingerprint.setText(Formatters.formatFingerprint(localRaw));
+    public boolean isPreviewMode() {
+        return isPreviewMode;
+    }
+
+    public JButton getBtnVerify() {
+        return btnVerify;
+    }
+
+    public JButton getBtnReject() {
+        return btnReject;
     }
 }

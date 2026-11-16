@@ -3,7 +3,7 @@ package vn.edu.p2p.desktop.util;
 import java.text.DecimalFormat;
 
 /**
- * Tiện ích định dạng dữ liệu kích thước, tốc độ và vân tay chứng chỉ.
+ * Tiện ích định dạng dữ liệu kích thước, tốc độ, thời gian và vân tay chứng chỉ.
  */
 public final class Formatters {
 
@@ -41,6 +41,41 @@ public final class Formatters {
             return DECIMAL_FORMAT.format(bytesPerSec / 1024.0) + " KB/s";
         }
         return DECIMAL_FORMAT.format(bytesPerSec / (1024.0 * 1024.0)) + " MB/s";
+    }
+
+    /**
+     * Tính toán phần trăm tiến độ từ 0 đến 100%.
+     * Xử lý an toàn các giá trị biên (chia cho 0, số âm, vượt quá 100%).
+     */
+    public static int calculateProgressPercentage(long transferredBytes, long totalBytes) {
+        if (totalBytes <= 0 || transferredBytes <= 0) {
+            return 0;
+        }
+        if (transferredBytes >= totalBytes) {
+            return 100;
+        }
+        return (int) Math.min(100, Math.max(0, (transferredBytes * 100) / totalBytes));
+    }
+
+    /**
+     * Định dạng thời gian ước tính còn lại (ETA) sang định dạng mm:ss hoặc hh:mm:ss.
+     */
+    public static String formatEta(long remainingBytes, double speedBytesPerSec) {
+        if (remainingBytes <= 0 || speedBytesPerSec <= 0) {
+            return "--:--";
+        }
+        long totalSeconds = (long) Math.ceil(remainingBytes / speedBytesPerSec);
+        if (totalSeconds < 0 || totalSeconds > 86400 * 7) {
+            return "--:--";
+        }
+        long hours = totalSeconds / 3600;
+        long minutes = (totalSeconds % 3600) / 60;
+        long seconds = totalSeconds % 60;
+
+        if (hours > 0) {
+            return String.format("%02d:%02d:%02d", hours, minutes, seconds);
+        }
+        return String.format("%02d:%02d", minutes, seconds);
     }
 
     /**

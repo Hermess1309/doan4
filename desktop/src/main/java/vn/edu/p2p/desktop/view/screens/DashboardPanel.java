@@ -1,6 +1,7 @@
 package vn.edu.p2p.desktop.view.screens;
 
 import java.awt.BorderLayout;
+import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
@@ -16,7 +17,10 @@ import javax.swing.JFileChooser;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JProgressBar;
+import vn.edu.p2p.desktop.model.SessionViewModel;
+import vn.edu.p2p.desktop.model.TransferViewModel;
 import vn.edu.p2p.desktop.util.Formatters;
+import vn.edu.p2p.desktop.util.ValidationUtils;
 
 /**
  * Màn hình Dashboard: Tổng quan kết nối, chọn tệp tin và theo dõi tiến trình gửi nhanh.
@@ -24,14 +28,18 @@ import vn.edu.p2p.desktop.util.Formatters;
 public class DashboardPanel extends JPanel {
 
     private final JLabel lblPeerStatus;
+    private final JLabel lblSecurityStatus;
     private final JLabel lblSelectedFile;
     private final JLabel lblFileSize;
+    private final JLabel lblFilePath;
+    private final JLabel lblFileError;
     private final JButton btnChooseFile;
     private final JButton btnSend;
     private final JProgressBar progressBar;
     private final JLabel lblTransferInfo;
 
     private File currentSelectedFile;
+    private SessionViewModel currentSession = SessionViewModel.createDisconnected();
 
     public DashboardPanel() {
         setLayout(new BorderLayout(16, 16));
@@ -48,7 +56,7 @@ public class DashboardPanel extends JPanel {
         gbc.gridy = 0;
         connectionCard.add(new JLabel("Thiết bị này:"), gbc);
         gbc.gridx = 1;
-        JLabel lblLocalDev = new JLabel("PC-Desktop (Cổng mặc định: 52001)");
+        JLabel lblLocalDev = new JLabel("PC-Desktop (Cổng LAN mặc định: 52001)");
         lblLocalDev.setFont(lblLocalDev.getFont().deriveFont(Font.BOLD));
         connectionCard.add(lblLocalDev, gbc);
 
@@ -56,21 +64,22 @@ public class DashboardPanel extends JPanel {
         gbc.gridy = 1;
         connectionCard.add(new JLabel("Đối tác kết nối:"), gbc);
         gbc.gridx = 1;
-        lblPeerStatus = new JLabel("Chưa kết nối (Vui lòng vào mục 'Thiết bị' để kết nối)");
+        lblPeerStatus = new JLabel("Chưa kết nối (Vào mục 'Thiết bị & Mạng' để kết nối)");
         connectionCard.add(lblPeerStatus, gbc);
 
         gbc.gridx = 0;
         gbc.gridy = 2;
         connectionCard.add(new JLabel("Trạng thái bảo mật:"), gbc);
         gbc.gridx = 1;
-        JLabel lblSec = new JLabel("Chưa xác minh vân tay chứng chỉ (TLS 1.3)");
-        connectionCard.add(lblSec, gbc);
+        lblSecurityStatus = new JLabel("Chưa có phiên TLS 1.3 được xác thực vân tay");
+        lblSecurityStatus.setForeground(new Color(229, 168, 59));
+        connectionCard.add(lblSecurityStatus, gbc);
 
         // 2. Thẻ chọn tệp tin và gửi (Center)
         JPanel sendCard = createCardPanel("Gửi tệp tin");
         sendCard.setLayout(new BoxLayout(sendCard, BoxLayout.Y_AXIS));
 
-        JPanel fileSelectionRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 12, 8));
+        JPanel fileSelectionRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 12, 6));
         btnChooseFile = new JButton("Chọn tệp tin từ máy...");
         lblSelectedFile = new JLabel("Chưa chọn tệp tin nào");
         lblSelectedFile.setFont(lblSelectedFile.getFont().deriveFont(Font.ITALIC));
@@ -80,11 +89,30 @@ public class DashboardPanel extends JPanel {
         fileSelectionRow.add(lblFileSize);
         sendCard.add(fileSelectionRow);
 
-        JPanel actionRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 12, 8));
+        // Hiển thị đường dẫn tệp
+        JPanel pathRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 12, 2));
+        lblFilePath = new JLabel("");
+        lblFilePath.setFont(lblFilePath.getFont().deriveFont(Font.PLAIN, 11f));
+        pathRow.add(lblFilePath);
+        sendCard.add(pathRow);
+
+        // Thông báo lỗi nếu file không đọc được
+        JPanel errorRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 12, 2));
+        lblFileError = new JLabel("");
+        lblFileError.setForeground(new Color(229, 87, 83));
+        lblFileError.setFont(lblFileError.getFont().deriveFont(Font.BOLD, 12f));
+        errorRow.add(lblFileError);
+        sendCard.add(errorRow);
+
+        JPanel actionRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 12, 6));
         btnSend = new JButton("Bắt đầu gửi tệp tin");
-        // Nút gửi mặc định bị vô hiệu hóa khi chưa kết nối và chưa xác thực
+        // Nút gửi bắt buộc disabled khi chưa có kết nối đã xác minh
         btnSend.setEnabled(false);
         actionRow.add(btnSend);
+
+        JLabel lblHint = new JLabel("*(Nút gửi chỉ khả dụng sau khi phiên TLS đã xác minh vân tay)*");
+        lblHint.setFont(lblHint.getFont().deriveFont(Font.ITALIC, 11f));
+        actionRow.add(lblHint);
         sendCard.add(actionRow);
 
         // 3. Thẻ tiến trình truyền tệp gần nhất (South)
@@ -123,12 +151,66 @@ public class DashboardPanel extends JPanel {
         fileChooser.setDialogTitle("Chọn tệp tin cần gửi qua P2P");
         int result = fileChooser.showOpenDialog(this);
         if (result == JFileChooser.APPROVE_OPTION) {
-            currentSelectedFile = fileChooser.getSelectedFile();
-            lblSelectedFile.setText(currentSelectedFile.getName());
-            lblSelectedFile.setFont(lblSelectedFile.getFont().deriveFont(Font.BOLD));
-            lblFileSize.setText("(" + Formatters.formatBytes(currentSelectedFile.length()) + ")");
-            // Ghi chú: Nút gửi vẫn giữ disabled nếu chưa có kết nối peer được xác minh
+            File selected = fileChooser.getSelectedFile();
+            if (selected == null) {
+                return;
+            }
+            if (!ValidationUtils.isValidReadableFile(selected)) {
+                lblFileError.setText("Lỗi: Tệp tin không tồn tại, là thư mục hoặc không có quyền đọc!");
+                lblSelectedFile.setText("Tệp không hợp lệ");
+                lblFileSize.setText("");
+                lblFilePath.setText(selected.getAbsolutePath());
+                currentSelectedFile = null;
+            } else {
+                currentSelectedFile = selected;
+                lblFileError.setText("");
+                lblSelectedFile.setText(selected.getName());
+                lblSelectedFile.setFont(lblSelectedFile.getFont().deriveFont(Font.BOLD));
+                lblFileSize.setText("(" + Formatters.formatBytes(selected.length()) + ")");
+                lblFilePath.setText("Đường dẫn: " + selected.getAbsolutePath());
+            }
+            updateSendButtonState();
         }
+        // Nếu người dùng nhấn Cancel, giữ nguyên trạng thái cũ
+    }
+
+    public void updateSessionState(SessionViewModel session) {
+        this.currentSession = (session != null) ? session : SessionViewModel.createDisconnected();
+        if (currentSession.sessionId().isBlank()) {
+            lblPeerStatus.setText("Chưa kết nối (Vào mục 'Thiết bị & Mạng' để kết nối)");
+            lblSecurityStatus.setText("Chưa có phiên TLS 1.3 được xác thực vân tay");
+            lblSecurityStatus.setForeground(new Color(229, 168, 59));
+        } else {
+            lblPeerStatus.setText(currentSession.remoteAddress() + " (Phiên #" + currentSession.sessionId() + ")");
+            if (currentSession.isFingerprintVerified()) {
+                lblSecurityStatus.setText("✓ ĐÃ XÁC MINH VÂN TAY CHỨNG CHỈ (TLS 1.3)");
+                lblSecurityStatus.setForeground(new Color(73, 156, 84));
+            } else {
+                lblSecurityStatus.setText("! CHƯA XÁC MINH VÂN TAY (Vào mục Bảo mật để xác thực)");
+                lblSecurityStatus.setForeground(new Color(229, 168, 59));
+            }
+        }
+        updateSendButtonState();
+    }
+
+    public void updateTransferProgress(TransferViewModel transfer) {
+        if (transfer == null || transfer.state() == TransferViewModel.TransferState.IDLE) {
+            lblTransferInfo.setText("Chưa có tác vụ truyền tải nào đang hoạt động");
+            progressBar.setValue(0);
+            progressBar.setString("0%");
+            return;
+        }
+        lblTransferInfo.setText(transfer.direction().getDisplayName() + ": " + transfer.fileName()
+                + " — " + transfer.getFormattedSizeProgress() + " (" + transfer.state().getDisplayName() + ")");
+        progressBar.setValue(transfer.getProgressPercentage());
+        progressBar.setString(transfer.getProgressPercentage() + "% — " + transfer.getFormattedSpeed());
+    }
+
+    private void updateSendButtonState() {
+        boolean canSend = currentSession.isReadyToTransfer()
+                && currentSelectedFile != null
+                && ValidationUtils.isValidReadableFile(currentSelectedFile);
+        btnSend.setEnabled(canSend);
     }
 
     private JPanel createCardPanel(String title) {
@@ -154,5 +236,9 @@ public class DashboardPanel extends JPanel {
 
     public File getCurrentSelectedFile() {
         return currentSelectedFile;
+    }
+
+    public JLabel getLblFileError() {
+        return lblFileError;
     }
 }

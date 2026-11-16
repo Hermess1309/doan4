@@ -2,9 +2,12 @@ package vn.edu.p2p.desktop.view;
 
 import java.awt.BorderLayout;
 import java.awt.CardLayout;
+import java.awt.Color;
 import java.awt.Dimension;
 import javax.swing.JFrame;
 import javax.swing.JPanel;
+import vn.edu.p2p.desktop.model.SessionViewModel;
+import vn.edu.p2p.desktop.model.TransferViewModel;
 import vn.edu.p2p.desktop.view.screens.DashboardPanel;
 import vn.edu.p2p.desktop.view.screens.DevicesPanel;
 import vn.edu.p2p.desktop.view.screens.SecurityPanel;
@@ -13,7 +16,7 @@ import vn.edu.p2p.desktop.view.screens.TransfersPanel;
 
 /**
  * Cửa sổ chính của ứng dụng P2P File Transfer Desktop.
- * Sử dụng Border Layout kết hợp CardLayout để điều hướng mượt mà giữa các màn hình.
+ * Sử dụng BorderLayout kết hợp CardLayout để điều hướng mượt mà giữa các màn hình.
  */
 public class MainFrame extends JFrame {
 
@@ -82,6 +85,37 @@ public class MainFrame extends JFrame {
             case SidebarPanel.TAB_SECURITY -> headerPanel.setTitle("Bảo mật & Xác thực Vân tay");
             case SidebarPanel.TAB_SETTINGS -> headerPanel.setTitle("Cài đặt hệ thống");
             default -> headerPanel.setTitle("P2P File Transfer");
+        }
+    }
+
+    /**
+     * Cập nhật toàn bộ trạng thái phiên kết nối trên các màn hình và thanh trạng thái.
+     */
+    public void updateSession(SessionViewModel session) {
+        dashboardPanel.updateSessionState(session);
+        devicesPanel.updateSession(session);
+        securityPanel.updateSession(session);
+
+        if (session == null || session.sessionId().isBlank()) {
+            headerPanel.setConnectionBadge("[ Chưa kết nối ]", new Color(157, 160, 168));
+            statusBarPanel.setEngineStatus("Sẵn sàng (Chưa kết nối)");
+        } else if (session.isFingerprintVerified()) {
+            headerPanel.setConnectionBadge("[ ✓ " + session.remoteAddress() + " ]", new Color(73, 156, 84));
+            statusBarPanel.setEngineStatus("Đã kết nối & Xác thực an toàn");
+        } else {
+            headerPanel.setConnectionBadge("[ ! " + session.remoteAddress() + " (Chưa xác minh) ]", new Color(229, 168, 59));
+            statusBarPanel.setEngineStatus("Đã kết nối TLS - Chờ xác minh vân tay");
+        }
+    }
+
+    /**
+     * Cập nhật tiến trình truyền tải file trên Dashboard và TransfersPanel.
+     */
+    public void updateTransfer(TransferViewModel transfer) {
+        dashboardPanel.updateTransferProgress(transfer);
+        transfersPanel.updateTransferProgress(transfer);
+        if (transfer != null) {
+            statusBarPanel.setNetworkSpeed("Tốc độ: " + transfer.getFormattedSpeed());
         }
     }
 

@@ -18,6 +18,7 @@ import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
 import javax.swing.SwingUtilities;
+import vn.edu.p2p.desktop.model.SessionViewModel;
 import vn.edu.p2p.desktop.util.Formatters;
 import vn.edu.p2p.desktop.view.dialogs.FingerprintVerificationDialog;
 
@@ -27,8 +28,12 @@ import vn.edu.p2p.desktop.view.dialogs.FingerprintVerificationDialog;
 public class SecurityPanel extends JPanel {
 
     private final JLabel lblVerificationBadge;
+    private final JLabel lblSessionInfo;
     private final JTextArea txtLocalFingerprint;
     private final JButton btnOpenVerificationDialog;
+    private final JButton btnPreviewDialog;
+
+    private SessionViewModel currentSession = SessionViewModel.createDisconnected();
 
     public SecurityPanel() {
         setLayout(new BorderLayout(16, 16));
@@ -54,6 +59,13 @@ public class SecurityPanel extends JPanel {
 
         gbc.gridx = 0;
         gbc.gridy = 1;
+        statusCard.add(new JLabel("Phiên kết nối:"), gbc);
+        gbc.gridx = 1;
+        lblSessionInfo = new JLabel("Chưa có phiên kết nối");
+        statusCard.add(lblSessionInfo, gbc);
+
+        gbc.gridx = 0;
+        gbc.gridy = 2;
         statusCard.add(new JLabel("Tình trạng xác minh:"), gbc);
         gbc.gridx = 1;
         lblVerificationBadge = new JLabel("[!] CHƯA CÓ KẾT NỐI ĐƯỢC XÁC THỰC");
@@ -62,17 +74,22 @@ public class SecurityPanel extends JPanel {
         statusCard.add(lblVerificationBadge, gbc);
 
         gbc.gridx = 0;
-        gbc.gridy = 2;
+        gbc.gridy = 3;
         gbc.gridwidth = 2;
-        btnOpenVerificationDialog = new JButton("Mở hộp thoại đối chiếu vân tay (Fingerprint Dialog)");
-        btnOpenVerificationDialog.setEnabled(false); // Sáng khi có phiên VERIFYING
-        statusCard.add(btnOpenVerificationDialog, gbc);
+        JPanel btnRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 0));
+        btnOpenVerificationDialog = new JButton("Xác minh vân tay phiên hiện tại");
+        btnOpenVerificationDialog.setEnabled(false); // Chỉ sáng khi có phiên thật từ backend
+
+        btnPreviewDialog = new JButton("Xem trước hộp thoại đối chiếu (Preview UI)");
+        btnRow.add(btnOpenVerificationDialog);
+        btnRow.add(btnPreviewDialog);
+        statusCard.add(btnRow, gbc);
 
         // 2. Thẻ hiển thị vân tay của máy này (Local Certificate Fingerprint)
         JPanel localFpCard = createCardPanel("Vân tay chứng chỉ của máy này (Local SHA-256)");
         localFpCard.setLayout(new BorderLayout(8, 8));
 
-        JLabel lblLocalFpHint = new JLabel("Chuỗi SHA-256 DER fingerprint được sinh từ keystore cục bộ của máy:");
+        JLabel lblLocalFpHint = new JLabel("Chuỗi SHA-256 DER fingerprint sinh từ keystore cục bộ của máy:");
         localFpCard.add(lblLocalFpHint, BorderLayout.NORTH);
 
         txtLocalFingerprint = new JTextArea(Formatters.formatFingerprint(""));
@@ -88,15 +105,59 @@ public class SecurityPanel extends JPanel {
 
         add(container, BorderLayout.NORTH);
 
-        // Sự kiện mở dialog (hỗ trợ kiểm thử trực tiếp)
-        btnOpenVerificationDialog.addActionListener(e -> {
+        // Sự kiện mở Preview Dialog (Preview mode: không lưu trạng thái thật, verify disabled)
+        btnPreviewDialog.addActionListener(e -> {
             Frame owner = (Frame) SwingUtilities.getWindowAncestor(this);
             FingerprintVerificationDialog dialog = new FingerprintVerificationDialog(
-                    owner, "demo-session", "192.168.1.20:52001",
+                    owner, "preview-session-8821", "192.168.1.20:52001 (Preview)",
                     "E47B9A128C3DF055A1B2C3D499887766102F4E6DAABBCCDD0123456789ABCDEF",
-                    "3F11A8C95D44201B7E6088912C5540AA00192837465564738291A0B1C2D3E4F5");
+                    "3F11A8C95D44201B7E6088912C5540AA00192837465564738291A0B1C2D3E4F5",
+                    true); // isPreviewMode = true
             dialog.setVisible(true);
         });
+
+        // Sự kiện mở Dialog thật khi có phiên
+        btnOpenVerificationDialog.addActionListener(e -> {
+            if (currentSession.sessionId().isBlank()) {
+                return;
+            }
+            Frame owner = (Frame) SwingUtilities.getWindowAncestor(this);
+            FingerprintVerificationDialog dialog = new FingerprintVerificationDialog(
+                    owner, currentSession.sessionId(), currentSession.remoteAddress(),
+                    currentSession.remoteFingerprintRaw(), currentSession.localFingerprintRaw(),
+                    false); // isPreviewMode = false
+            dialog.setVisible(true);
+            if (dialog.isVerified()) {
+                setVerificationStatus(true, currentSession.remoteAddress());
+            }
+        });
+    }
+
+    public void updateSession(SessionViewModel session) {
+        this.currentSession = (session != null) ? session : SessionViewModel.createDisconnected();
+        if (currentSession.sessionId().isBlank()) {
+            lblSessionInfo.setText("Chưa có phiên kết nối");
+            btnOpenVerificationDialog.setEnabled(false);
+            setVerificationStatus(false, "");
+        } else {
+            lblSessionInfo.setText(currentSession.remoteAddress() + " (Session #" + currentSession.sessionId() + ")");
+            btnOpenVerificationDialog.setEnabled(true);
+            setVerificationStatus(currentSession.isFingerprintVerified(), currentSession.remoteAddress());
+        }
+    }
+
+    public void setLocalFingerprint(String localFingerprintRaw) {
+        txtLocalFingerprint.setText(Formatters.formatFingerprint(localFingerprintRaw));
+    }
+
+    private void setVerificationStatus(boolean verified, String remoteAddress) {
+        if (verified) {
+            lblVerificationBadge.setText("[✓] ĐÃ XÁC THỰC AN TOÀN (" + remoteAddress + ")");
+            lblVerificationBadge.setForeground(new Color(73, 156, 84));
+        } else {
+            lblVerificationBadge.setText("[!] CHƯA CÓ KẾT NỐI ĐƯỢC XÁC THỰC");
+            lblVerificationBadge.setForeground(new Color(229, 168, 59));
+        }
     }
 
     private JPanel createCardPanel(String title) {
@@ -116,13 +177,11 @@ public class SecurityPanel extends JPanel {
         return btnOpenVerificationDialog;
     }
 
-    public void setVerificationStatus(boolean verified, String remoteAddress) {
-        if (verified) {
-            lblVerificationBadge.setText("[✓] ĐÃ XÁC THỰC AN TOÀN (" + remoteAddress + ")");
-            lblVerificationBadge.setForeground(new Color(73, 156, 84));
-        } else {
-            lblVerificationBadge.setText("[!] CHƯA CÓ KẾT NỐI ĐƯỢC XÁC THỰC");
-            lblVerificationBadge.setForeground(new Color(229, 168, 59));
-        }
+    public JButton getBtnPreviewDialog() {
+        return btnPreviewDialog;
+    }
+
+    public JLabel getLblVerificationBadge() {
+        return lblVerificationBadge;
     }
 }

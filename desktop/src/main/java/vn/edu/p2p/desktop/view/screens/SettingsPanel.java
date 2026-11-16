@@ -1,6 +1,7 @@
 package vn.edu.p2p.desktop.view.screens;
 
 import java.awt.BorderLayout;
+import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
@@ -18,15 +19,19 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JRadioButton;
 import javax.swing.JTextField;
+import vn.edu.p2p.desktop.model.AppSettings;
 import vn.edu.p2p.desktop.util.ThemeManager;
+import vn.edu.p2p.desktop.util.ValidationUtils;
 
 /**
  * Màn hình Settings: Cấu hình thư mục tải xuống, giao diện Dark/Light và thông tin ứng dụng.
+ * Lưu trữ bằng Java Preferences tiêu chuẩn, kiểm tra quyền ghi của thư mục.
  */
 public class SettingsPanel extends JPanel {
 
     private final JTextField txtDownloadDir;
     private final JButton btnBrowseDir;
+    private final JLabel lblDirStatus;
     private final JRadioButton rbDark;
     private final JRadioButton rbLight;
 
@@ -39,25 +44,26 @@ public class SettingsPanel extends JPanel {
 
         // 1. Thẻ Thư mục lưu trữ tệp nhận
         JPanel dirCard = createCardPanel("Thư mục lưu trữ tệp tin tải về");
-        dirCard.setLayout(new FlowLayout(FlowLayout.LEFT, 10, 8));
+        dirCard.setLayout(new BoxLayout(dirCard, BoxLayout.Y_AXIS));
 
-        String defaultDownload = System.getProperty("user.home") + File.separator + "Downloads";
-        txtDownloadDir = new JTextField(defaultDownload, 32);
+        JPanel browseRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 6));
+        txtDownloadDir = new JTextField(AppSettings.getDownloadDirectory(), 32);
         txtDownloadDir.setEditable(false);
         btnBrowseDir = new JButton("Duyệt thư mục...");
 
-        dirCard.add(new JLabel("Đường dẫn:"));
-        dirCard.add(txtDownloadDir);
-        dirCard.add(btnBrowseDir);
+        browseRow.add(new JLabel("Đường dẫn:"));
+        browseRow.add(txtDownloadDir);
+        browseRow.add(btnBrowseDir);
+        dirCard.add(browseRow);
 
-        btnBrowseDir.addActionListener(e -> {
-            JFileChooser chooser = new JFileChooser(txtDownloadDir.getText());
-            chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
-            chooser.setDialogTitle("Chọn thư mục lưu tệp tin");
-            if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
-                txtDownloadDir.setText(chooser.getSelectedFile().getAbsolutePath());
-            }
-        });
+        JPanel statusRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 2));
+        lblDirStatus = new JLabel("Thư mục hợp lệ và có quyền ghi.");
+        lblDirStatus.setFont(lblDirStatus.getFont().deriveFont(Font.PLAIN, 11f));
+        lblDirStatus.setForeground(new Color(73, 156, 84));
+        statusRow.add(lblDirStatus);
+        dirCard.add(statusRow);
+
+        btnBrowseDir.addActionListener(e -> chooseDownloadDirectory());
 
         // 2. Thẻ Giao diện (Theme)
         JPanel themeCard = createCardPanel("Chủ đề giao diện (FlatLaf Theme)");
@@ -111,6 +117,29 @@ public class SettingsPanel extends JPanel {
         add(container, BorderLayout.NORTH);
     }
 
+    private void chooseDownloadDirectory() {
+        JFileChooser chooser = new JFileChooser(txtDownloadDir.getText());
+        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+        chooser.setDialogTitle("Chọn thư mục lưu tệp tin tải về");
+        if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
+            File selected = chooser.getSelectedFile();
+            if (selected == null) {
+                return;
+            }
+            if (ValidationUtils.isValidWritableDirectory(selected)) {
+                boolean saved = AppSettings.setDownloadDirectory(selected.getAbsolutePath());
+                if (saved) {
+                    txtDownloadDir.setText(selected.getAbsolutePath());
+                    lblDirStatus.setText("Thư mục hợp lệ và đã được lưu cấu hình.");
+                    lblDirStatus.setForeground(new Color(73, 156, 84));
+                }
+            } else {
+                lblDirStatus.setText("Lỗi: Thư mục không tồn tại hoặc không có quyền ghi!");
+                lblDirStatus.setForeground(new Color(229, 87, 83));
+            }
+        }
+    }
+
     private JPanel createCardPanel(String title) {
         JPanel card = new JPanel();
         card.setBorder(BorderFactory.createCompoundBorder(
@@ -126,5 +155,13 @@ public class SettingsPanel extends JPanel {
 
     public String getDownloadDirectory() {
         return txtDownloadDir.getText().trim();
+    }
+
+    public JLabel getLblDirStatus() {
+        return lblDirStatus;
+    }
+
+    public JButton getBtnBrowseDir() {
+        return btnBrowseDir;
     }
 }
