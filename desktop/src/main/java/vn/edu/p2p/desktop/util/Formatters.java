@@ -32,9 +32,10 @@ public final class Formatters {
 
     /**
      * Định dạng tốc độ truyền tải byte/giây sang MB/s hoặc KB/s.
+     * Xử lý an toàn các giá trị âm, 0, NaN hoặc vô hạn.
      */
     public static String formatSpeed(double bytesPerSec) {
-        if (bytesPerSec <= 0) {
+        if (bytesPerSec <= 0 || Double.isNaN(bytesPerSec) || Double.isInfinite(bytesPerSec)) {
             return "0.0 KB/s";
         }
         if (bytesPerSec < 1024 * 1024) {
@@ -59,9 +60,10 @@ public final class Formatters {
 
     /**
      * Định dạng thời gian ước tính còn lại (ETA) sang định dạng mm:ss hoặc hh:mm:ss.
+     * Xử lý an toàn các giá trị âm, 0, NaN hoặc vô hạn.
      */
     public static String formatEta(long remainingBytes, double speedBytesPerSec) {
-        if (remainingBytes <= 0 || speedBytesPerSec <= 0) {
+        if (remainingBytes <= 0 || speedBytesPerSec <= 0 || Double.isNaN(speedBytesPerSec) || Double.isInfinite(speedBytesPerSec)) {
             return "--:--";
         }
         long totalSeconds = (long) Math.ceil(remainingBytes / speedBytesPerSec);

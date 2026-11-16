@@ -4,6 +4,7 @@ import vn.edu.p2p.desktop.util.Formatters;
 
 /**
  * ViewModel đại diện cho trạng thái hiển thị của một tác vụ truyền tải tệp tin.
+ * Khớp với vòng đời truyền file: IDLE -> OFFERED -> TRANSFERRING -> VERIFYING_FILE -> COMPLETED.
  */
 public record TransferViewModel(
         String transferId,
@@ -32,6 +33,7 @@ public record TransferViewModel(
 
     public enum TransferState {
         IDLE("Sẵn sàng (Chưa có tệp)"),
+        OFFERED("Đã gửi/nhận đề nghị truyền tệp (Offered)..."),
         QUEUED("Đang chờ gửi..."),
         TRANSFERRING("Đang truyền dữ liệu..."),
         PAUSED("Đã tạm dừng"),

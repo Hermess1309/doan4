@@ -2,6 +2,7 @@ package vn.edu.p2p.desktop.model;
 
 /**
  * ViewModel đại diện cho trạng thái của phiên kết nối mạng hiện hành.
+ * Bám sát vòng đời trạng thái quy định trong docs/SPEC.md.
  */
 public record SessionViewModel(
         String sessionId,
@@ -11,7 +12,26 @@ public record SessionViewModel(
         boolean isRelay,
         boolean isTlsHandshakeDone,
         boolean isFingerprintVerified,
+        SessionState state,
         String stateDescription) {
+
+    public enum SessionState {
+        DISCONNECTED("Chưa kết nối (DISCONNECTED)"),
+        CONNECTING("Đang kết nối..."),
+        VERIFYING("Chờ xác minh vân tay (TLS 1.3)"),
+        READY("Đã xác thực vân tay, sẵn sàng truyền dữ liệu"),
+        CLOSED("Đã đóng kết nối");
+
+        private final String displayName;
+
+        SessionState(String displayName) {
+            this.displayName = displayName;
+        }
+
+        public String getDisplayName() {
+            return displayName;
+        }
+    }
 
     public static SessionViewModel createDisconnected() {
         return new SessionViewModel(
@@ -22,10 +42,15 @@ public record SessionViewModel(
                 false,
                 false,
                 false,
-                "CHƯA KẾT NỐI (DISCONNECTED)");
+                SessionState.DISCONNECTED,
+                SessionState.DISCONNECTED.getDisplayName());
     }
 
     public boolean isReadyToTransfer() {
-        return isTlsHandshakeDone && isFingerprintVerified && sessionId != null && !sessionId.isBlank();
+        return state == SessionState.READY
+                && isTlsHandshakeDone
+                && isFingerprintVerified
+                && sessionId != null
+                && !sessionId.isBlank();
     }
 }

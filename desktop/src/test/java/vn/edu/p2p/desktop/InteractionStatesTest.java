@@ -167,6 +167,7 @@ class InteractionStatesTest {
                     false,
                     true,
                     true,
+                    SessionViewModel.SessionState.READY,
                     "CONNECTED_AND_VERIFIED");
 
             frame.updateSession(verifiedSession);

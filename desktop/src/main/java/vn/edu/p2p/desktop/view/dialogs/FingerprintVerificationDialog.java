@@ -20,6 +20,7 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
+import javax.swing.Timer;
 import vn.edu.p2p.desktop.util.Formatters;
 
 /**
@@ -158,18 +159,28 @@ public class FingerprintVerificationDialog extends JDialog {
             }
         });
 
-        btnCopyRemote.addActionListener(e -> copyToClipboard(rawRemoteFp));
-        btnCopyLocal.addActionListener(e -> copyToClipboard(rawLocalFp));
+        btnCopyRemote.addActionListener(e -> copyToClipboard(rawRemoteFp, btnCopyRemote));
+        btnCopyLocal.addActionListener(e -> copyToClipboard(rawLocalFp, btnCopyLocal));
 
         buttonPanel.add(btnReject);
         buttonPanel.add(btnVerify);
         add(buttonPanel, BorderLayout.SOUTH);
     }
 
-    private void copyToClipboard(String text) {
-        if (text != null && !text.isBlank()) {
+    private void copyToClipboard(String text, JButton sourceButton) {
+        if (text == null || text.isBlank()) {
+            return;
+        }
+        try {
             StringSelection selection = new StringSelection(text);
             Toolkit.getDefaultToolkit().getSystemClipboard().setContents(selection, null);
+            String originalText = sourceButton.getText();
+            sourceButton.setText("✓ Đã sao chép");
+            Timer timer = new Timer(1500, e -> sourceButton.setText(originalText));
+            timer.setRepeats(false);
+            timer.start();
+        } catch (Exception ex) {
+            sourceButton.setToolTipText("Lỗi clipboard: " + ex.getMessage());
         }
     }
 
@@ -198,5 +209,13 @@ public class FingerprintVerificationDialog extends JDialog {
 
     public JButton getBtnReject() {
         return btnReject;
+    }
+
+    public JButton getBtnCopyRemote() {
+        return btnCopyRemote;
+    }
+
+    public JButton getBtnCopyLocal() {
+        return btnCopyLocal;
     }
 }

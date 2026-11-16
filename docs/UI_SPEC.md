@@ -7,7 +7,7 @@
 - **Mô hình kiến trúc**: MVP (Model - View - Presenter) kết hợp Adapter pattern.
   - View (`desktop/src/main/java/vn/edu/p2p/desktop/view`): Chỉ chứa các component giao diện, không chứa socket, crypto hay logic truyền file.
   - ViewModel (`vn.edu.p2p.desktop.model`): `TransferViewModel`, `SessionViewModel`, `AppSettings`.
-  - Adapter (`vn.edu.p2p.desktop.adapter`): Cầu nối gọi sang public API của `vn.edu.p2p.core`.
+  - Adapter (`vn.edu.p2p.desktop.adapter`): Interface `CoreApiAdapter` chuẩn bị kết nối với public API của `vn.edu.p2p.core`.
 - **Nguyên tắc an toàn luồng (Concurrency & EDT Rules)**:
   - Mọi thao tác vẽ và cập nhật component Swing bắt buộc phải thực thi trên **Event Dispatch Thread (EDT)**.
   - Các callback từ Core Backend (`onProgress`, `onSessionStateChanged`, v.v.) chạy trên worker thread phải được bọc trong `SwingUtilities.invokeLater(...)`.
@@ -45,7 +45,7 @@ Cửa sổ chính `MainFrame` (980 x 640 px, min 820 x 540 px) chia thành 3 khu
 ### 4.1. Dashboard (Tổng quan & Gửi tệp)
 - **Thông tin phiên**: Tên thiết bị, trạng thái kết nối, trạng thái xác thực bảo mật.
 - **Chọn tệp tin**: `JFileChooser` chọn 1 tệp tin cục bộ, hiển thị tên, đường dẫn và kích thước (format B/KB/MB/GB).
-- **Kiểm tra tệp tin**: Xử lý an toàn khi đóng hộp thoại không chọn file (giữ nguyên tệp cũ); nếu file không tồn tại hoặc không thể đọc -> báo lỗi bằng chữ đỏ và không cho gửi.
+- **Kiểm tra tệp tin**: Xử lý an toàn khi đóng hộp thoại không chọn file (giữ nguyên tệp cũ); nếu file không tồn tại hoặc không thể đọc -> báo lỗi bằng chữ đỏ và không cho gửi. Hỗ trợ file rỗng (0 bytes) theo đúng SPEC.
 - **Nút gửi tệp**: Mặc định `btnSend.setEnabled(false)`; chỉ bật khi phiên ở trạng thái `READY` (đã xác thực vân tay) VÀ tệp tin hợp lệ.
 - **Tiến trình tệp**: Thẻ thu nhỏ hiển thị thanh tiến độ, tốc độ hiện thời và trạng thái nhận từ `TransferViewModel`. Tuyệt đối không mô phỏng gửi thành công giả.
 
@@ -64,7 +64,7 @@ Cửa sổ chính `MainFrame` (980 x 640 px, min 820 x 540 px) chia thành 3 khu
   - Hướng truyền: Gửi đi (Upload) hoặc Nhận về (Download).
   - Tốc độ mạng (MB/s hoặc KB/s) và thời gian ước tính còn lại (ETA: mm:ss hoặc hh:mm:ss).
   - Thanh tiến độ `JProgressBar` (0–100%) hiển thị số phần trăm và tốc độ.
-  - Trạng thái: Sẵn sàng, Đang chờ, Đang truyền, Đang xác thực SHA-256, Hoàn tất, Thất bại, Đã hủy.
+  - Trạng thái: Sẵn sàng, Đã gửi đề nghị (Offered), Đang truyền, Đang xác thực SHA-256, Hoàn tất, Thất bại, Đã hủy.
   - Nút Hủy và Resume: Giữ disabled khi chưa có backend thật.
   - Nút "Mở thư mục đích": Bật khi hoàn thành truyền tải.
 
@@ -73,7 +73,7 @@ Cửa sổ chính `MainFrame` (980 x 640 px, min 820 x 540 px) chia thành 3 khu
 - **Vân tay máy này**: Hiển thị chuỗi SHA-256 DER fingerprint sinh từ keystore cục bộ dạng cụm hex có dấu hai chấm.
 - **Hộp thoại `FingerprintVerificationDialog`**:
   - Bắt buộc đối chiếu vân tay qua kênh độc lập (gọi điện, gặp mặt) trước khi truyền file.
-  - Nút "Sao chép" (Copy to Clipboard) cho cả Local và Remote Fingerprint.
+  - Nút "Sao chép" (Copy to Clipboard) cho cả Local và Remote Fingerprint, kèm phản hồi thị giác ("✓ Đã sao chép") và bọc try-catch chống lỗi `IllegalStateException`.
   - Nếu ở chế độ xem trước (Preview Mode): Hiển thị cảnh báo màu đỏ và vô hiệu hóa nút xác minh thật (`btnVerify.setEnabled(false)`).
   - Nếu thiếu session ID hoặc thiếu remote fingerprint: Nút xác minh bắt buộc disabled.
   - Không lưu trạng thái xác thực giả vào hệ thống.
@@ -121,5 +121,21 @@ public interface P2pEngine {
 ## 6. Lộ trình Triển khai UI
 
 - **UI-01**: Khung ứng dụng Java Swing, FlatLaf Dark/Light, Navigation CardLayout, các màn hình skeleton và dialog xác minh fingerprint. *(Hoàn thành — Commit 0ea73f4)*.
-- **UI-02**: Tinh chỉnh tương tác giao diện, validation dữ liệu đầu vào (IP, Port, Pairing Code, Directory, File), ViewModels, xử lý trạng thái disabled an toàn và kiểm thử tự động toàn diện. *(Hoàn thành)*.
+- **UI-02**: Tinh chỉnh tương tác giao diện, validation dữ liệu đầu vào (IP, Port, Pairing Code, Directory, File), ViewModels, xử lý trạng thái disabled an toàn và kiểm thử tự động toàn diện. *(Hoàn thành — Commit 8cf4ecd)*.
+- **UI-QA-01 (Hiện tại)**: Rà soát QA, bảo vệ an toàn luồng và clipboard, chuẩn bị adapter `CoreApiAdapter`, hoàn thiện bảng mapping tích hợp cho UI-03.
 - **UI-03**: Nối `RealCoreApiAdapter` với API thật của `core/`, xử lý luồng sự kiện qua EDT và kiểm thử toàn diện trên Windows và Linux.
+
+---
+
+## 7. Bảng Mapping Tích hợp UI ↔ Core API (UI-03 Blueprint)
+
+| Thành phần UI (UI Action) | Phương thức Core API cần gọi | Callback / Event nhận về | Điều kiện bảo mật bắt buộc | Quy tắc điều phối luồng (Threading) |
+| :--- | :--- | :--- | :--- | :--- |
+| **Devices — Bấm "Kết nối LAN"** | `engine.connectDirect(host, port)` | `onSessionStateChanged(SessionInfo)` | Nhập đúng cú pháp IPv4/Host và Port hợp lệ | Trả về `CompletableFuture`; callback đẩy về EDT qua `SwingUtilities.invokeLater` |
+| **Devices — Bấm "Ghép nối Relay"** | `engine.connectRelay(pairingCode)` | `onSessionStateChanged(SessionInfo)` | Mã ghép nối đúng định dạng 6–12 ký tự | Trả về `CompletableFuture`; cập nhật UI trên EDT |
+| **Security — Mở hộp thoại xác minh** | `engine.getSecurityInfo(sessionId)` | N/A (Truy vấn đồng bộ) | Phải có `sessionId` và phiên đã hoàn tất handshake TLS 1.3 | Đọc dữ liệu từ DTO; mở modal dialog trên EDT |
+| **Security — Bấm "✓ Đã xác thực"** | `engine.confirmFingerprintVerification(sessionId, remoteFp)` | `onSessionStateChanged(SessionInfo)` | Người dùng đã đối chiếu đầy đủ 64 ký tự SHA-256 qua kênh độc lập | Core chuyển trạng thái sang `SessionState.READY`; Desktop bật nút gửi file |
+| **Dashboard — Bấm "Bắt đầu gửi tệp"** | `engine.offerFile(sessionId, filePath)` | `onIncomingOffer(offer)`, `onProgress(progress)` | Bắt buộc phiên ở trạng thái `READY` và tệp tin đọc được | Trả về transferId; callback `onProgress` cập nhật UI (giới hạn tần suất 100ms) |
+| **Transfers — Bấm "Hủy truyền"** | `engine.cancelTransfer(transferId)` | `onTransferFailed(transferId, "Cancelled")` | Có tác vụ đang ở trạng thái `TRANSFERRING` | Core giải phóng socket/stream; UI reset về trạng thái `CANCELLED` trên EDT |
+| **Transfers — Bấm "Tiếp tục"** | `engine.resumeTransfer(transferId)` | `onProgress(progress)` | Core M4 xác thực đủ điều kiện resume an toàn | Nếu core từ chối an toàn, UI thông báo truyền lại từ đầu |
+| **Hộp thoại nhận file gửi tới** | `engine.acceptTransfer(id, dir)` hoặc `rejectTransfer(id, reason)` | `onTransferCompleted` hoặc `onTransferFailed` | Người dùng chủ động chọn thư mục đích hợp lệ có quyền ghi | Bật popup trên EDT khi có sự kiện `onIncomingOffer` |
