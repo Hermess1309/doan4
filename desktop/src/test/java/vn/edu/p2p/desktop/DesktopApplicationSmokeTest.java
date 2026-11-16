@@ -45,12 +45,14 @@ class DesktopApplicationSmokeTest {
             ThemeManager.setTheme(ThemeMode.DARK, frame);
             assertEquals(ThemeMode.DARK, ThemeManager.getCurrentMode());
 
-            // 4. Mở dialog và test sao chép
+            // 4. Mở dialog và test sao chép local fingerprint
             FingerprintVerificationDialog dialog = new FingerprintVerificationDialog(
                     frame, "test-session", "192.168.1.10:52001",
-                    "E47B9A128C3DF055", "3F11A8C95D44201B", true);
-            assertNotNull(dialog.getBtnCopyRemote());
-            dialog.getBtnCopyRemote().doClick();
+                    "E47B9A128C3DF055A1B2C3D499887766102F4E6DAABBCCDD0123456789ABCDEF",
+                    "3F11A8C95D44201B7E6088912C5540AA00192837465564738291A0B1C2D3E4F5",
+                    true);
+            assertNotNull(dialog.getBtnCopyLocal());
+            dialog.getBtnCopyLocal().doClick();
             dialog.dispose();
 
             frame.dispose();

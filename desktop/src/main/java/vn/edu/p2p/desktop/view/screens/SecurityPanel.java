@@ -9,6 +9,7 @@ import java.awt.Frame;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
+import java.util.function.BiConsumer;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
@@ -19,21 +20,25 @@ import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
 import javax.swing.SwingUtilities;
 import vn.edu.p2p.desktop.model.SessionViewModel;
+import vn.edu.p2p.desktop.model.SessionViewModel.SessionState;
 import vn.edu.p2p.desktop.util.Formatters;
 import vn.edu.p2p.desktop.view.dialogs.FingerprintVerificationDialog;
 
 /**
- * Màn hình Security: Quản lý chứng chỉ bảo mật TLS 1.3 và trạng thái xác thực vân tay.
+ * Màn hình Security: Quản lý chứng chỉ bảo mật TLS 1.3 và điều phối luồng xác minh vân tay M2.
+ * Ngăn chặn tuyệt đối việc tự động đánh dấu an toàn khi chưa bắt tay TLS 1.3 thành công.
  */
 public class SecurityPanel extends JPanel {
 
     private final JLabel lblVerificationBadge;
     private final JLabel lblSessionInfo;
+    private final JLabel lblTlsDetail;
     private final JTextArea txtLocalFingerprint;
     private final JButton btnOpenVerificationDialog;
     private final JButton btnPreviewDialog;
 
     private SessionViewModel currentSession = SessionViewModel.createDisconnected();
+    private BiConsumer<String, String> onTlsHandshakeRequested;
 
     public SecurityPanel() {
         setLayout(new BorderLayout(16, 16));
@@ -42,8 +47,8 @@ public class SecurityPanel extends JPanel {
         JPanel container = new JPanel();
         container.setLayout(new BoxLayout(container, BoxLayout.Y_AXIS));
 
-        // 1. Thẻ trạng thái xác minh phiên
-        JPanel statusCard = createCardPanel("Trạng thái bảo mật phiên hiện hành");
+        // 1. Thẻ trạng thái bảo mật phiên hiện hành
+        JPanel statusCard = createCardPanel("Trạng thái bảo mật phiên mạng hiện hành");
         statusCard.setLayout(new GridBagLayout());
         GridBagConstraints gbc = new GridBagConstraints();
         gbc.insets = new Insets(6, 8, 6, 8);
@@ -51,11 +56,11 @@ public class SecurityPanel extends JPanel {
 
         gbc.gridx = 0;
         gbc.gridy = 0;
-        statusCard.add(new JLabel("Chứng chỉ & Mã hóa:"), gbc);
+        statusCard.add(new JLabel("Cơ chế bảo vệ:"), gbc);
         gbc.gridx = 1;
-        JLabel lblTls = new JLabel("TLS 1.3 (Mutual TLS - Pinning SHA-256)");
-        lblTls.setFont(lblTls.getFont().deriveFont(Font.BOLD));
-        statusCard.add(lblTls, gbc);
+        lblTlsDetail = new JLabel("TLS 1.3 Mutual Authentication (SHA-256 Pinning trước handshake)");
+        lblTlsDetail.setFont(lblTlsDetail.getFont().deriveFont(Font.BOLD));
+        statusCard.add(lblTlsDetail, gbc);
 
         gbc.gridx = 0;
         gbc.gridy = 1;
@@ -66,19 +71,19 @@ public class SecurityPanel extends JPanel {
 
         gbc.gridx = 0;
         gbc.gridy = 2;
-        statusCard.add(new JLabel("Tình trạng xác minh:"), gbc);
+        statusCard.add(new JLabel("Tình trạng an toàn:"), gbc);
         gbc.gridx = 1;
-        lblVerificationBadge = new JLabel("[!] CHƯA CÓ KẾT NỐI ĐƯỢC XÁC THỰC");
+        lblVerificationBadge = new JLabel("[!] CHƯA KẾT NỐI (DISCONNECTED)");
         lblVerificationBadge.setFont(lblVerificationBadge.getFont().deriveFont(Font.BOLD));
-        lblVerificationBadge.setForeground(new Color(229, 168, 59));
+        lblVerificationBadge.setForeground(new Color(157, 160, 168));
         statusCard.add(lblVerificationBadge, gbc);
 
         gbc.gridx = 0;
         gbc.gridy = 3;
         gbc.gridwidth = 2;
         JPanel btnRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 0));
-        btnOpenVerificationDialog = new JButton("Xác minh vân tay phiên hiện tại");
-        btnOpenVerificationDialog.setEnabled(false); // Chỉ sáng khi có phiên thật từ backend
+        btnOpenVerificationDialog = new JButton("Đối chiếu vân tay & Bắt tay TLS 1.3");
+        btnOpenVerificationDialog.setEnabled(false); // Sáng khi ở trạng thái TCP_CONNECTED hoặc WAITING_FOR_FINGERPRINT
 
         btnPreviewDialog = new JButton("Xem trước hộp thoại đối chiếu (Preview UI)");
         btnRow.add(btnOpenVerificationDialog);
@@ -89,7 +94,8 @@ public class SecurityPanel extends JPanel {
         JPanel localFpCard = createCardPanel("Vân tay chứng chỉ của máy này (Local SHA-256)");
         localFpCard.setLayout(new BorderLayout(8, 8));
 
-        JLabel lblLocalFpHint = new JLabel("Chuỗi SHA-256 DER fingerprint sinh từ keystore cục bộ của máy:");
+        JLabel lblLocalFpHint = new JLabel("<html>Chuỗi SHA-256 DER fingerprint sinh từ danh tính cục bộ (Local Identity). "
+                + "Hãy đọc chuỗi này cho đối tác qua kênh độc lập:</html>");
         localFpCard.add(lblLocalFpHint, BorderLayout.NORTH);
 
         txtLocalFingerprint = new JTextArea(Formatters.formatFingerprint(""));
@@ -105,18 +111,18 @@ public class SecurityPanel extends JPanel {
 
         add(container, BorderLayout.NORTH);
 
-        // Sự kiện mở Preview Dialog (Preview mode: không lưu trạng thái thật, verify disabled)
+        // Sự kiện mở Preview Dialog
         btnPreviewDialog.addActionListener(e -> {
             Frame owner = (Frame) SwingUtilities.getWindowAncestor(this);
             FingerprintVerificationDialog dialog = new FingerprintVerificationDialog(
                     owner, "preview-session-8821", "192.168.1.20:52001 (Preview)",
-                    "E47B9A128C3DF055A1B2C3D499887766102F4E6DAABBCCDD0123456789ABCDEF",
                     "3F11A8C95D44201B7E6088912C5540AA00192837465564738291A0B1C2D3E4F5",
+                    "E47B9A128C3DF055A1B2C3D499887766102F4E6DAABBCCDD0123456789ABCDEF",
                     true); // isPreviewMode = true
             dialog.setVisible(true);
         });
 
-        // Sự kiện mở Dialog thật khi có phiên
+        // Sự kiện mở Dialog xác minh thật khi có phiên
         btnOpenVerificationDialog.addActionListener(e -> {
             if (currentSession.sessionId().isBlank()) {
                 return;
@@ -124,40 +130,87 @@ public class SecurityPanel extends JPanel {
             Frame owner = (Frame) SwingUtilities.getWindowAncestor(this);
             FingerprintVerificationDialog dialog = new FingerprintVerificationDialog(
                     owner, currentSession.sessionId(), currentSession.remoteAddress(),
-                    currentSession.remoteFingerprintRaw(), currentSession.localFingerprintRaw(),
+                    currentSession.localFingerprintRaw(), currentSession.expectedRemoteFingerprintRaw(),
                     false); // isPreviewMode = false
+
+            dialog.setOnFingerprintConfirmed(verifiedPin -> {
+                // Người dùng đã nhập và xác nhận pin vân tay đối tác -> chuyển sang trạng thái bắt tay TLS
+                // Tuyệt đối KHÔNG tự ý chuyển sang SECURE_READY ở đây, phải chờ kết quả handshake từ backend!
+                updateSession(new SessionViewModel(
+                        currentSession.sessionId(),
+                        currentSession.remoteAddress(),
+                        currentSession.localFingerprintRaw(),
+                        verifiedPin,
+                        currentSession.isRelay(),
+                        SessionState.TLS_HANDSHAKING,
+                        ""));
+
+                if (onTlsHandshakeRequested != null) {
+                    onTlsHandshakeRequested.accept(currentSession.sessionId(), verifiedPin);
+                }
+            });
+
             dialog.setVisible(true);
-            if (dialog.isVerified()) {
-                setVerificationStatus(true, currentSession.remoteAddress());
-            }
         });
     }
 
     public void updateSession(SessionViewModel session) {
         this.currentSession = (session != null) ? session : SessionViewModel.createDisconnected();
-        if (currentSession.sessionId().isBlank()) {
+        String sId = currentSession.sessionId();
+        String addr = currentSession.remoteAddress();
+
+        if (sId.isBlank() || currentSession.state() == SessionState.DISCONNECTED) {
             lblSessionInfo.setText("Chưa có phiên kết nối");
+            lblVerificationBadge.setText("[!] CHƯA KẾT NỐI (DISCONNECTED)");
+            lblVerificationBadge.setForeground(new Color(157, 160, 168));
             btnOpenVerificationDialog.setEnabled(false);
-            setVerificationStatus(false, "");
-        } else {
-            lblSessionInfo.setText(currentSession.remoteAddress() + " (Session #" + currentSession.sessionId() + ")");
-            btnOpenVerificationDialog.setEnabled(true);
-            setVerificationStatus(currentSession.isFingerprintVerified(), currentSession.remoteAddress());
+            return;
+        }
+
+        lblSessionInfo.setText(addr + " (Session #" + sId + ")");
+
+        switch (currentSession.state()) {
+            case TCP_CONNECTED -> {
+                lblVerificationBadge.setText("[!] ĐÃ NỐI TCP — CHƯA THIẾT LẬP TLS (Chưa bảo mật)");
+                lblVerificationBadge.setForeground(new Color(229, 168, 59));
+                btnOpenVerificationDialog.setEnabled(true);
+            }
+            case WAITING_FOR_FINGERPRINT -> {
+                lblVerificationBadge.setText("[!] CHỜ NHẬP VÂN TAY ĐỐI TÁC QUA KÊNH ĐỘC LẬP");
+                lblVerificationBadge.setForeground(new Color(229, 168, 59));
+                btnOpenVerificationDialog.setEnabled(true);
+            }
+            case TLS_HANDSHAKING -> {
+                lblVerificationBadge.setText("[⟳] ĐANG BẮT TAY MUTUAL TLS 1.3...");
+                lblVerificationBadge.setForeground(new Color(53, 116, 240));
+                btnOpenVerificationDialog.setEnabled(false);
+            }
+            case SECURE_READY -> {
+                lblVerificationBadge.setText("[✓] KẾT NỐI AN TOÀN ĐÃ XÁC THỰC (TLS 1.3 MUTUAL)");
+                lblVerificationBadge.setForeground(new Color(73, 156, 84));
+                btnOpenVerificationDialog.setEnabled(false);
+            }
+            case ERROR -> {
+                String err = (currentSession.errorMessage() != null && !currentSession.errorMessage().isBlank())
+                        ? currentSession.errorMessage() : "Xác thực thất bại / Lỗi kết nối";
+                lblVerificationBadge.setText("[✕] " + err.toUpperCase());
+                lblVerificationBadge.setForeground(new Color(229, 87, 83));
+                btnOpenVerificationDialog.setEnabled(false);
+            }
+            case CLOSED -> {
+                lblVerificationBadge.setText("[!] PHIÊN ĐÃ ĐÓNG (CLOSED)");
+                lblVerificationBadge.setForeground(new Color(157, 160, 168));
+                btnOpenVerificationDialog.setEnabled(false);
+            }
+            default -> {
+                lblVerificationBadge.setText("[!] " + currentSession.state().getDisplayName());
+                btnOpenVerificationDialog.setEnabled(false);
+            }
         }
     }
 
     public void setLocalFingerprint(String localFingerprintRaw) {
         txtLocalFingerprint.setText(Formatters.formatFingerprint(localFingerprintRaw));
-    }
-
-    private void setVerificationStatus(boolean verified, String remoteAddress) {
-        if (verified) {
-            lblVerificationBadge.setText("[✓] ĐÃ XÁC THỰC AN TOÀN (" + remoteAddress + ")");
-            lblVerificationBadge.setForeground(new Color(73, 156, 84));
-        } else {
-            lblVerificationBadge.setText("[!] CHƯA CÓ KẾT NỐI ĐƯỢC XÁC THỰC");
-            lblVerificationBadge.setForeground(new Color(229, 168, 59));
-        }
     }
 
     private JPanel createCardPanel(String title) {
@@ -183,5 +236,9 @@ public class SecurityPanel extends JPanel {
 
     public JLabel getLblVerificationBadge() {
         return lblVerificationBadge;
+    }
+
+    public void setOnTlsHandshakeRequested(BiConsumer<String, String> onTlsHandshakeRequested) {
+        this.onTlsHandshakeRequested = onTlsHandshakeRequested;
     }
 }

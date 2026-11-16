@@ -1,5 +1,6 @@
 package vn.edu.p2p.desktop;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -84,6 +85,45 @@ class ValidationUtilsTest {
         assertFalse(ValidationUtils.isValidPairingCode("!@#$%^"));
         assertFalse(ValidationUtils.isValidPairingCode(null));
         assertFalse(ValidationUtils.isValidPairingCode(""));
+    }
+
+    @Test
+    void testValidFingerprint() {
+        // Dạng 64 ký tự hex liên tiếp
+        String hex64 = "E47B9A128C3DF055A1B2C3D499887766102F4E6DAABBCCDD0123456789ABCDEF";
+        assertTrue(ValidationUtils.isValidFingerprint(hex64));
+        assertTrue(ValidationUtils.isValidFingerprint(hex64.toLowerCase()));
+
+        // Dạng 32 cặp hex phân tách bằng dấu hai chấm
+        String colons32 = "E4:7B:9A:12:8C:3D:F0:55:A1:B2:C3:D4:99:88:77:66:10:2F:4E:6D:AA:BB:CC:DD:01:23:45:67:89:AB:CD:EF";
+        assertTrue(ValidationUtils.isValidFingerprint(colons32));
+        assertTrue(ValidationUtils.isValidFingerprint(colons32.toLowerCase()));
+
+        // Chuẩn hóa
+        assertEquals(hex64, ValidationUtils.canonicalizeFingerprint(colons32));
+        assertEquals(hex64, ValidationUtils.canonicalizeFingerprint(hex64.toLowerCase()));
+    }
+
+    @Test
+    void testInvalidFingerprint() {
+        // Rỗng hoặc null
+        assertFalse(ValidationUtils.isValidFingerprint(null));
+        assertFalse(ValidationUtils.isValidFingerprint(""));
+        assertFalse(ValidationUtils.isValidFingerprint("   "));
+        assertEquals("", ValidationUtils.canonicalizeFingerprint(""));
+
+        // Quá ngắn (63 ký tự)
+        assertFalse(ValidationUtils.isValidFingerprint("E47B9A128C3DF055A1B2C3D499887766102F4E6DAABBCCDD0123456789ABCDE"));
+
+        // Quá dài (65 ký tự)
+        assertFalse(ValidationUtils.isValidFingerprint("E47B9A128C3DF055A1B2C3D499887766102F4E6DAABBCCDD0123456789ABCDEFA"));
+
+        // Chứa ký tự không phải hex
+        assertFalse(ValidationUtils.isValidFingerprint("G47B9A128C3DF055A1B2C3D499887766102F4E6DAABBCCDD0123456789ABCDEF"));
+
+        // Dạng hai chấm nhưng sai số cặp (chỉ có 31 cặp)
+        String colons31 = "E4:7B:9A:12:8C:3D:F0:55:A1:B2:C3:D4:99:88:77:66:10:2F:4E:6D:AA:BB:CC:DD:01:23:45:67:89:AB:CD";
+        assertFalse(ValidationUtils.isValidFingerprint(colons31));
     }
 
     @Test

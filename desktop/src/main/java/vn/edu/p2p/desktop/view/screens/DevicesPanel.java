@@ -18,6 +18,7 @@ import javax.swing.JPanel;
 import javax.swing.JRadioButton;
 import javax.swing.JTextField;
 import vn.edu.p2p.desktop.model.SessionViewModel;
+import vn.edu.p2p.desktop.model.SessionViewModel.SessionState;
 import vn.edu.p2p.desktop.util.ValidationUtils;
 
 /**
@@ -188,8 +189,8 @@ public class DevicesPanel extends JPanel {
         }
 
         lblInputError.setText("");
-        lblConnectionStatus.setText("ĐANG CHỜ BACKEND (UI-02 Placeholder: Chưa kết nối socket thật)");
-        lblPeerDetails.setText("Mục tiêu: " + host + ":" + portStr + " (Chờ Codex hoàn thành M2/TLS)");
+        lblConnectionStatus.setText("ĐÃ NỐI TCP — CHỜ NHẬP VÂN TAY (Chưa bắt tay TLS)");
+        lblPeerDetails.setText("Đối tác: " + host + ":" + portStr + " (Vào mục 'Bảo mật' để đối chiếu vân tay)");
     }
 
     private void validateAndHandleRelayConnect() {
@@ -200,14 +201,14 @@ public class DevicesPanel extends JPanel {
         }
 
         lblInputError.setText("");
-        lblConnectionStatus.setText("ĐANG CHỜ BACKEND (UI-02 Placeholder: Chưa kết nối Relay thật)");
+        lblConnectionStatus.setText("ĐANG CHỜ RELAY GHÉP PHIÊN (UI Placeholder)");
         lblPeerDetails.setText("Mã ghép nối: " + code + " (Chờ Codex hoàn thành M6 Relay)");
     }
 
     public void updateSession(SessionViewModel session) {
         this.currentSession = (session != null) ? session : SessionViewModel.createDisconnected();
-        lblConnectionStatus.setText(currentSession.stateDescription());
-        if (currentSession.sessionId().isBlank()) {
+        lblConnectionStatus.setText(currentSession.state().getDisplayName().toUpperCase());
+        if (currentSession.sessionId().isBlank() || currentSession.state() == SessionState.DISCONNECTED) {
             lblPeerDetails.setText("Chưa có đối tác kết nối.");
             btnDisconnect.setEnabled(false);
         } else {

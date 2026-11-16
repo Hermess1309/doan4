@@ -21,6 +21,10 @@ public final class ValidationUtils {
     // Regex kiểm tra mã ghép nối Relay (Pairing Code): 6-12 ký tự chữ/số, hoặc dạng 3-6 ký tự có dấu gạch ngang
     private static final Pattern PAIRING_CODE_PATTERN = Pattern.compile("^[a-zA-Z0-9]{6,12}$|^[a-zA-Z0-9]{3,6}-[a-zA-Z0-9]{3,6}$");
 
+    // Regex kiểm tra SHA-256 fingerprint: đủ 64 ký tự hex hoặc 32 cặp hex phân tách bằng dấu hai chấm (32 bytes)
+    private static final Pattern FINGERPRINT_HEX_PATTERN = Pattern.compile("^[0-9a-fA-F]{64}$");
+    private static final Pattern FINGERPRINT_COLON_PATTERN = Pattern.compile("^([0-9a-fA-F]{2}:){31}[0-9a-fA-F]{2}$");
+
     private ValidationUtils() {}
 
     /**
@@ -102,6 +106,34 @@ public final class ValidationUtils {
             return false;
         }
         return PAIRING_CODE_PATTERN.matcher(trimmed).matches();
+    }
+
+    /**
+     * Kiểm tra chuỗi SHA-256 certificate fingerprint có đúng chuẩn 32 byte (256 bit) hay không.
+     * Chấp nhận dạng 64 ký tự hex liên tiếp hoặc 32 cặp hex phân tách bằng dấu hai chấm.
+     * Khớp 1:1 với bộ phân tích cú pháp của vn.edu.p2p.crypto.Fingerprint trong M2.
+     */
+    public static boolean isValidFingerprint(String fingerprint) {
+        if (fingerprint == null) {
+            return false;
+        }
+        String stripped = fingerprint.strip();
+        if (stripped.isEmpty()) {
+            return false;
+        }
+        return FINGERPRINT_HEX_PATTERN.matcher(stripped).matches()
+                || FINGERPRINT_COLON_PATTERN.matcher(stripped).matches();
+    }
+
+    /**
+     * Chuẩn hóa chuỗi vân tay về dạng 64 ký tự hex viết hoa (không chứa dấu hai chấm).
+     * Trả về chuỗi rỗng nếu không hợp lệ.
+     */
+    public static String canonicalizeFingerprint(String fingerprint) {
+        if (!isValidFingerprint(fingerprint)) {
+            return "";
+        }
+        return fingerprint.strip().replace(":", "").toUpperCase();
     }
 
     /**

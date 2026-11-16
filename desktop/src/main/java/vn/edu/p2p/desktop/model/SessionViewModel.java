@@ -2,25 +2,26 @@ package vn.edu.p2p.desktop.model;
 
 /**
  * ViewModel đại diện cho trạng thái của phiên kết nối mạng hiện hành.
- * Bám sát vòng đời trạng thái quy định trong docs/SPEC.md.
+ * Phản ánh chính xác kiến trúc bảo mật M2:
+ * DISCONNECTED -> TCP_CONNECTED -> WAITING_FOR_FINGERPRINT -> TLS_HANDSHAKING -> SECURE_READY / ERROR.
  */
 public record SessionViewModel(
         String sessionId,
         String remoteAddress,
         String localFingerprintRaw,
-        String remoteFingerprintRaw,
+        String expectedRemoteFingerprintRaw,
         boolean isRelay,
-        boolean isTlsHandshakeDone,
-        boolean isFingerprintVerified,
         SessionState state,
-        String stateDescription) {
+        String errorMessage) {
 
     public enum SessionState {
         DISCONNECTED("Chưa kết nối (DISCONNECTED)"),
-        CONNECTING("Đang kết nối..."),
-        VERIFYING("Chờ xác minh vân tay (TLS 1.3)"),
-        READY("Đã xác thực vân tay, sẵn sàng truyền dữ liệu"),
-        CLOSED("Đã đóng kết nối");
+        TCP_CONNECTED("Đã kết nối TCP (Chưa bắt tay TLS)"),
+        WAITING_FOR_FINGERPRINT("Chờ nhập vân tay đối tác (Kênh độc lập)"),
+        TLS_HANDSHAKING("Đang bắt tay Mutual TLS 1.3..."),
+        SECURE_READY("Kết nối an toàn đã xác thực (TLS 1.3)"),
+        ERROR("Lỗi kết nối / Xác thực thất bại"),
+        CLOSED("Đã đóng kết nối (CLOSED)");
 
         private final String displayName;
 
@@ -40,16 +41,12 @@ public record SessionViewModel(
                 "",
                 "",
                 false,
-                false,
-                false,
                 SessionState.DISCONNECTED,
-                SessionState.DISCONNECTED.getDisplayName());
+                "");
     }
 
     public boolean isReadyToTransfer() {
-        return state == SessionState.READY
-                && isTlsHandshakeDone
-                && isFingerprintVerified
+        return state == SessionState.SECURE_READY
                 && sessionId != null
                 && !sessionId.isBlank();
     }

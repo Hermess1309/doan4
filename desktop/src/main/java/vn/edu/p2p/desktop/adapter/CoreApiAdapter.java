@@ -8,13 +8,15 @@ import vn.edu.p2p.desktop.model.TransferViewModel;
 
 /**
  * Hợp đồng Adapter nội bộ của desktop/ kết nối với Core Backend.
- * Trong UI-03, adapter cụ thể (RealCoreApiAdapter) sẽ wrap instance P2pEngine
- * và chuyển đổi dữ liệu DTO của core sang ViewModel của Desktop.
+ * Phản ánh đúng 2 giai đoạn bảo mật của M2:
+ * 1. Kết nối TCP (LAN / Relay).
+ * 2. Cung cấp expected remote fingerprint qua kênh độc lập để bắt tay Mutual TLS 1.3.
  */
 public interface CoreApiAdapter {
 
     /**
-     * Bắt đầu kết nối trực tiếp qua LAN IP và Port.
+     * Bắt đầu kết nối TCP trực tiếp qua LAN IP và Port.
+     * Trả về session ở trạng thái TCP_CONNECTED / WAITING_FOR_FINGERPRINT (chưa chạy TLS).
      */
     CompletableFuture<SessionViewModel> connectDirect(String host, int port);
 
@@ -24,17 +26,24 @@ public interface CoreApiAdapter {
     CompletableFuture<SessionViewModel> connectRelay(String pairingCode);
 
     /**
-     * Ngắt kết nối phiên hiện tại.
+     * Lấy chuỗi SHA-256 fingerprint của danh tính máy này (Local Identity).
+     */
+    String getLocalFingerprint();
+
+    /**
+     * Cung cấp fingerprint của đối tác đã đối chiếu qua kênh độc lập,
+     * khởi động quá trình bắt tay Mutual TLS 1.3 có pinning chứng chỉ.
+     * Trả về session ở trạng thái SECURE_READY nếu thành công hoặc ERROR nếu thất bại.
+     */
+    CompletableFuture<SessionViewModel> startTlsHandshake(String sessionId, String expectedRemoteFingerprint);
+
+    /**
+     * Ngắt kết nối phiên hiện tại và đóng tài nguyên mạng/TLS.
      */
     CompletableFuture<Void> disconnect(String sessionId);
 
     /**
-     * Xác nhận người dùng đã đối chiếu đúng vân tay chứng chỉ qua kênh độc lập.
-     */
-    boolean confirmFingerprint(String sessionId, String remoteFingerprint);
-
-    /**
-     * Gửi đề nghị truyền tệp tin đã chọn qua phiên đã xác minh.
+     * Gửi đề nghị truyền tệp tin đã chọn (chỉ khả dụng khi session ở trạng thái SECURE_READY).
      */
     CompletableFuture<String> offerFile(String sessionId, File file);
 
@@ -42,6 +51,11 @@ public interface CoreApiAdapter {
      * Chấp nhận tệp tin gửi đến và lưu vào thư mục đích.
      */
     CompletableFuture<Void> acceptTransfer(String transferId, File destinationDirectory);
+
+    /**
+     * Từ chối tệp tin gửi đến.
+     */
+    CompletableFuture<Void> rejectTransfer(String transferId, String reason);
 
     /**
      * Hủy bỏ tác vụ truyền tệp tin đang diễn ra.

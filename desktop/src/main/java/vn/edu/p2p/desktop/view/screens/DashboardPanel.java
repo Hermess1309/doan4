@@ -18,12 +18,14 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JProgressBar;
 import vn.edu.p2p.desktop.model.SessionViewModel;
+import vn.edu.p2p.desktop.model.SessionViewModel.SessionState;
 import vn.edu.p2p.desktop.model.TransferViewModel;
 import vn.edu.p2p.desktop.util.Formatters;
 import vn.edu.p2p.desktop.util.ValidationUtils;
 
 /**
  * Màn hình Dashboard: Tổng quan kết nối, chọn tệp tin và theo dõi tiến trình gửi nhanh.
+ * Nút gửi chỉ được kích hoạt khi phiên ở trạng thái SECURE_READY và tệp tin hợp lệ.
  */
 public class DashboardPanel extends JPanel {
 
@@ -71,8 +73,8 @@ public class DashboardPanel extends JPanel {
         gbc.gridy = 2;
         connectionCard.add(new JLabel("Trạng thái bảo mật:"), gbc);
         gbc.gridx = 1;
-        lblSecurityStatus = new JLabel("Chưa có phiên TLS 1.3 được xác thực vân tay");
-        lblSecurityStatus.setForeground(new Color(229, 168, 59));
+        lblSecurityStatus = new JLabel("Chưa kết nối");
+        lblSecurityStatus.setForeground(new Color(157, 160, 168));
         connectionCard.add(lblSecurityStatus, gbc);
 
         // 2. Thẻ chọn tệp tin và gửi (Center)
@@ -171,23 +173,43 @@ public class DashboardPanel extends JPanel {
             }
             updateSendButtonState();
         }
-        // Nếu người dùng nhấn Cancel, giữ nguyên trạng thái cũ
     }
 
     public void updateSessionState(SessionViewModel session) {
         this.currentSession = (session != null) ? session : SessionViewModel.createDisconnected();
-        if (currentSession.sessionId().isBlank()) {
+        if (currentSession.sessionId().isBlank() || currentSession.state() == SessionState.DISCONNECTED) {
             lblPeerStatus.setText("Chưa kết nối (Vào mục 'Thiết bị & Mạng' để kết nối)");
-            lblSecurityStatus.setText("Chưa có phiên TLS 1.3 được xác thực vân tay");
-            lblSecurityStatus.setForeground(new Color(229, 168, 59));
+            lblSecurityStatus.setText("Chưa kết nối");
+            lblSecurityStatus.setForeground(new Color(157, 160, 168));
         } else {
             lblPeerStatus.setText(currentSession.remoteAddress() + " (Phiên #" + currentSession.sessionId() + ")");
-            if (currentSession.isFingerprintVerified()) {
-                lblSecurityStatus.setText("✓ ĐÃ XÁC MINH VÂN TAY CHỨNG CHỈ (TLS 1.3)");
-                lblSecurityStatus.setForeground(new Color(73, 156, 84));
-            } else {
-                lblSecurityStatus.setText("! CHƯA XÁC MINH VÂN TAY (Vào mục Bảo mật để xác thực)");
-                lblSecurityStatus.setForeground(new Color(229, 168, 59));
+            switch (currentSession.state()) {
+                case TCP_CONNECTED -> {
+                    lblSecurityStatus.setText("! Đã nối TCP — Chưa thiết lập TLS (Chưa bảo mật)");
+                    lblSecurityStatus.setForeground(new Color(229, 168, 59));
+                }
+                case WAITING_FOR_FINGERPRINT -> {
+                    lblSecurityStatus.setText("! Chờ nhập vân tay đối tác (Kênh độc lập)");
+                    lblSecurityStatus.setForeground(new Color(229, 168, 59));
+                }
+                case TLS_HANDSHAKING -> {
+                    lblSecurityStatus.setText("⟳ Đang bắt tay Mutual TLS 1.3...");
+                    lblSecurityStatus.setForeground(new Color(53, 116, 240));
+                }
+                case SECURE_READY -> {
+                    lblSecurityStatus.setText("✓ ĐÃ XÁC THỰC MUTUAL TLS 1.3 (An toàn)");
+                    lblSecurityStatus.setForeground(new Color(73, 156, 84));
+                }
+                case ERROR -> {
+                    String err = (currentSession.errorMessage() != null && !currentSession.errorMessage().isBlank())
+                            ? currentSession.errorMessage() : "Lỗi xác thực / Handshake thất bại";
+                    lblSecurityStatus.setText("✕ " + err);
+                    lblSecurityStatus.setForeground(new Color(229, 87, 83));
+                }
+                default -> {
+                    lblSecurityStatus.setText(currentSession.state().getDisplayName());
+                    lblSecurityStatus.setForeground(new Color(157, 160, 168));
+                }
             }
         }
         updateSendButtonState();
@@ -240,5 +262,9 @@ public class DashboardPanel extends JPanel {
 
     public JLabel getLblFileError() {
         return lblFileError;
+    }
+
+    public JLabel getLblSecurityStatus() {
+        return lblSecurityStatus;
     }
 }

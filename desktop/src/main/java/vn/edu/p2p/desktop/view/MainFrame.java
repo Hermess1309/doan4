@@ -7,6 +7,7 @@ import java.awt.Dimension;
 import javax.swing.JFrame;
 import javax.swing.JPanel;
 import vn.edu.p2p.desktop.model.SessionViewModel;
+import vn.edu.p2p.desktop.model.SessionViewModel.SessionState;
 import vn.edu.p2p.desktop.model.TransferViewModel;
 import vn.edu.p2p.desktop.view.screens.DashboardPanel;
 import vn.edu.p2p.desktop.view.screens.DevicesPanel;
@@ -90,21 +91,45 @@ public class MainFrame extends JFrame {
 
     /**
      * Cập nhật toàn bộ trạng thái phiên kết nối trên các màn hình và thanh trạng thái.
+     * Ánh xạ chính xác theo các trạng thái an toàn của M2: TCP_CONNECTED, WAITING_FOR_FINGERPRINT,
+     * TLS_HANDSHAKING, SECURE_READY.
      */
     public void updateSession(SessionViewModel session) {
         dashboardPanel.updateSessionState(session);
         devicesPanel.updateSession(session);
         securityPanel.updateSession(session);
 
-        if (session == null || session.sessionId().isBlank()) {
+        if (session == null || session.sessionId().isBlank() || session.state() == SessionState.DISCONNECTED) {
             headerPanel.setConnectionBadge("[ Chưa kết nối ]", new Color(157, 160, 168));
             statusBarPanel.setEngineStatus("Sẵn sàng (Chưa kết nối)");
-        } else if (session.isFingerprintVerified()) {
-            headerPanel.setConnectionBadge("[ ✓ " + session.remoteAddress() + " ]", new Color(73, 156, 84));
-            statusBarPanel.setEngineStatus("Đã kết nối & Xác thực an toàn");
-        } else {
-            headerPanel.setConnectionBadge("[ ! " + session.remoteAddress() + " (Chưa xác minh) ]", new Color(229, 168, 59));
-            statusBarPanel.setEngineStatus("Đã kết nối TLS - Chờ xác minh vân tay");
+            return;
+        }
+
+        switch (session.state()) {
+            case TCP_CONNECTED -> {
+                headerPanel.setConnectionBadge("[ TCP: " + session.remoteAddress() + " (Chưa TLS) ]", new Color(229, 168, 59));
+                statusBarPanel.setEngineStatus("Đã nối TCP — Chờ nhập vân tay trước khi bắt tay TLS");
+            }
+            case WAITING_FOR_FINGERPRINT -> {
+                headerPanel.setConnectionBadge("[ Chờ nhập vân tay ]", new Color(229, 168, 59));
+                statusBarPanel.setEngineStatus("Chờ nhập vân tay đối tác từ kênh độc lập");
+            }
+            case TLS_HANDSHAKING -> {
+                headerPanel.setConnectionBadge("[ ⟳ Đang bắt tay TLS 1.3... ]", new Color(53, 116, 240));
+                statusBarPanel.setEngineStatus("Đang tiến hành bắt tay Mutual TLS 1.3...");
+            }
+            case SECURE_READY -> {
+                headerPanel.setConnectionBadge("[ ✓ Bảo mật TLS 1.3: " + session.remoteAddress() + " ]", new Color(73, 156, 84));
+                statusBarPanel.setEngineStatus("Kết nối an toàn đã xác thực (Mutual TLS 1.3)");
+            }
+            case ERROR -> {
+                headerPanel.setConnectionBadge("[ ✕ Lỗi kết nối / TLS ]", new Color(229, 87, 83));
+                statusBarPanel.setEngineStatus("Lỗi: " + session.errorMessage());
+            }
+            default -> {
+                headerPanel.setConnectionBadge("[ " + session.state().getDisplayName() + " ]", new Color(157, 160, 168));
+                statusBarPanel.setEngineStatus(session.state().getDisplayName());
+            }
         }
     }
 
