@@ -4,7 +4,7 @@
 
 Sinh viên làm cá nhân trong 15 ngày làm việc, 3–4 giờ/ngày (45–60 giờ), có Codex phụ trách backend và Antigravity phụ trách desktop. Mục tiêu: demo truyền file thực trên Windows và Linux, có test và bằng chứng kiểm chứng bảo mật. macOS là nền tảng CI build, chưa phải cam kết demo.
 
-M0 đã hoàn tất scaffold. M1 triển khai binary framing theo yêu cầu mới; các hành vi TLS, truyền file và relay bên dưới vẫn là yêu cầu tương lai, chưa triển khai. Không tự chuyển sang M2.
+M0/M1 đã hoàn tất; M2 hiện thực nền tảng TLS 1.3 và xác minh fingerprint theo yêu cầu mới. Truyền file, resume, relay và UI tích hợp vẫn chưa triển khai. Không tự chuyển sang M3.
 
 ## Kiến trúc
 
@@ -97,3 +97,13 @@ Public API protocol: `MessageType.id()/fromId(int)`, `Message(type, payload)` v�
 Chỉ hỗ trợ blocking InputStream/OutputStream; readFully xử lý partial read. Blocking OutputStream.write hoàn thành dữ liệu được yêu cầu hoặc ném lỗi; chưa cung cấp NIO channel API. Caller cấu hình timeout, đồng bộ truy cập chung stream, flush khi phù hợp và đóng tài nguyên. Codec không tự close/flush và không có state chung. Mỗi frame có bộ nhớ hữu hạn (gồm các bản sao defensive), không tải toàn bộ file vào RAM.
 
 Codec không cung cấp mã hóa/xác thực, kiểm tra tên file, hash hoặc thứ tự state machine. Chỉ được dùng cho dữ liệu file sau xác minh peer/TLS theo SPEC. Ví dụ OFFER payload ASCII "AB": `00 00 00 04 01 01 41 42`; đây chỉ là ví dụ framing, không phải schema offer hợp lệ của M3.
+
+## Nền tảng TLS M2
+
+M2 hiện thực phương án pin trước handshake tại D004, chỉ Java 21/JCA/JSSE, không thêm dependency. Profile PKCS12/self-signed và lệnh tạo bằng keytool, API và giới hạn chi tiết tại [SECURITY](SECURITY.md). Có loader LocalIdentity, SHA-256 Fingerprint, CertificatePolicy/PinnedTrustManager và PeerTlsSession/TlsSessionInfo.
+
+Pending verification diễn ra trước TLS: chưa có certificate remote thực tế, không truyền TLS/app bytes và không cấp stream. Hai bên lấy full fingerprint qua kênh tin cậy độc lập rồi verify đúng UUID của phiên hiện tại trên worker. Không hỗ trợ handshake “preview” trust-all để thu chứng chỉ lạ. Pin, profile chứng chỉ, platform JSSE validation và mutual client authentication được kiểm tra trong handshake TLS 1.3.
+
+Stream ứng dụng chỉ được cấp sau handshake và kiểm tra certificate thực tế của SSLSession; không expose socket/session JSSE thô. Snapshot có state, local/remote fingerprints, protocol/cipher và UUID; không chứa keys/password. Mỗi connection dùng context/state mới, không tự áp dụng xác minh cũ khi đổi cert hoặc reconnect. Lỗi đóng socket; close từ UI có thể hủy handshake.
+
+Đây là crypto API để core tích hợp tại M3; chưa thay public API core hoặc thêm P2pEngine. Desktop tiếp tục chỉ gọi core. SO_TIMEOUT hiện giới hạn từng read; deadline handshake/chờ người dùng, connect timeout và giới hạn số phiên thuộc core sau này. TLS localhost được kiểm thử ở M2; byte tunnel relay thực và demo Windows/Linux hai máy thuộc M6/M8.

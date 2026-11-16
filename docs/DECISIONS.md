@@ -47,3 +47,15 @@ Chọn 9 ID tường minh theo hành vi SPEC: OFFER/ACCEPT/REJECT/CHUNK/COMPLETE
 Chọn blocking stream API đơn giản cho MVP: encode/decode byte array hoặc write/read một frame trên stream; Optional.empty biểu thị EOF sạch, EOFException biểu thị frame bị cắt. ProtocolException kế thừa IOException; caller đóng connection sau mọi lỗi đọc/ghi. Không tự close/flush stream để adapter quản lý buffer và tài nguyên. Length unsigned được kiểm tra bằng long trước cấp phát payload; version/type cũng được kiểm tra trước cấp phát. Mỗi payload có defensive copy và giới hạn hữu hạn.
 
 D007 còn mở timeout socket, schema metadata/chunk, nguồn file thay đổi và API progress của core; không coi những phần đó đã được triển khai. Không thay public API core hoặc thêm dependency/build plugin.
+
+## D010 — M2 strict pre-handshake verification (2026-11-16, triển khai)
+
+Giữ D004: không thiết lập TLS với cert chưa có full pin đã đối chiếu độc lập. Pending là TCP chưa chạy TLS, remote fingerprint chỉ có sau handshake. Không có trust-all/TOFU hay encrypted-preview mode; UI phải nói rõ trạng thái. verify nhận UUID phiên để chống áp dụng callback cũ sang connection mới. Một SSLContext mới mỗi connection tránh resumption vượt kiểm tra pin mới.
+
+Identity MVP chọn profile hẹp: một private-key entry PKCS12, một cert X509v3 self-signed non-CA, RSA 3072–8192 bit, SHA256withRSA, digitalSignature + EKU hai vai trò, còn hạn. Loader kiểm tra key/cert khớp bằng JCA Signature và xóa bản sao password/buffer; khóa cần thiết vẫn tồn tại trong KeyManager/JVM. Không dùng thư viện ngoài hoặc API JDK nội bộ.
+
+PinnedTrustManager không chỉ so pin: kiểm tra profile/chữ ký/thời hạn, rồi tạo trust anchor tạm chỉ từ cert đã khớp và delegate platform X509ExtendedTrustManager để giữ algorithm/role constraints. Peer identity dựa vào pin, không HTTPS hostname; relay/IP không phải identity. TLSv1.3-only và needClientAuth trên server.
+
+PeerTlsSession sở hữu socket, gate mọi stream operation, không trả raw JSSE socket/session; snapshot metadata không tự cấp quyền truyền. Verification/handshake/I/O failure đóng phiên; close có thể hủy handshake. Local TLS completion không chứng minh remote đã xác minh xong/accept offer (flight cuối TLS1.3 có thể còn được server xử lý). M3 phải xử lý alerts, EOF và protocol errors, chỉ truyền sau state VERIFIED và offer accepted.
+
+M2 diff có thể vượt mục tiêu mềm 500 dòng vì identity validation, six TrustManager entry points, lifecycle/cancel gate và negative tests phải được review cùng nhau; không thêm chức năng M3. Xem SECURITY.md về keytool, API, các test và giới hạn timeout/OS permissions.

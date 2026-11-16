@@ -2,7 +2,7 @@
 
 Đồ án 4: ứng dụng truyền tệp ngang hàng đa nền tảng, mã hóa đầu cuối bằng TLS 1.3 giữa hai peer. Java 21, Gradle multi-module; desktop dự kiến dùng Swing + FlatLaf. Repository chính thức: [Hermess1309/doan4](https://github.com/Hermess1309/doan4).
 
-**Trạng thái M1:** có khung build 6 module, binary frame codec version 1 và unit tests cho protocol (xem wire contract trong SPEC). Chưa có kết nối mạng, TLS, truyền file, relay hoạt động hoặc UI. Không dùng scaffold này để truyền dữ liệu thật.
+**Trạng thái M2:** có binary frame codec, nền tảng JSSE TLS 1.3/pinning và test localhost thật. Chưa có P2pEngine/CLI kết nối, truyền file, relay hoạt động hoặc UI. Hướng dẫn identity và xác minh tại [SECURITY](docs/SECURITY.md). Không dùng scaffold này để truyền dữ liệu thật.
 
 ## Chuẩn bị
 

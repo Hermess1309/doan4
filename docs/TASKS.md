@@ -5,8 +5,8 @@
 | Ngày | Mốc | Đầu ra và kiểm chứng | Trạng thái |
 | --- | --- | --- | --- |
 | 1 | M0 | Khung, tài liệu, 6 smoke test, CI 3 OS | Xong cục bộ; CI chưa chạy |
-| 2 | M1 | Frame/codec; bounded length, partial read/EOF, malformed input | Build/test Windows PASS; chờ review |
-| 3 | M2 | Identity, TLS 1.3, pinning hai chiều, negative tests | Chưa bắt đầu |
+| 2 | M1 | Frame/codec; bounded length, partial read/EOF, malformed input | PASS local + CI 3 OS |
+| 3 | M2 | Identity, TLS 1.3, pinning hai chiều, negative tests | PASS Windows; chờ review |
 | 4–5 | M3 | Offer/accept/reject, streaming/chunk, hash, progress API | Chưa bắt đầu |
 | 6 | M4 | Cancel, disconnect, resume an toàn và negative tests | Chưa bắt đầu |
 | 7 | M5 | Demo LAN hai peer, timeout và lỗi filesystem | Chưa bắt đầu |
@@ -73,3 +73,22 @@ $env:GRADLE_USER_HOME = 'C:\Users\PC\Documents\Study\Do_an_4\.tools\gradle-home'
 Kết quả: protocol 42/42 test PASS (41 ca M1 + 1 smoke M0); toàn bộ dự án 47/47 PASS, 0 skipped/failure/error. Clean build và Spotless PASS, 52 task thực thi. XML/HTML tại `<module>/build/test-results/test/` và `<module>/build/reports/tests/test/`. Không thay logic test cũ hoặc build system. Chưa tuyên bố M1 pass trên Linux/macOS tại thời điểm ghi log local này; CI sau push được báo riêng theo commit.
 
 Kiến thức bảo vệ M1: TCP không giữ ranh giới message; length prefix và readFully; phân biệt EOF sạch với truncation; big-endian và unsigned u32 trong Java; giới hạn trước cấp phát; lỗi giữa frame phải đóng stream; framing không thay thế TLS, xác minh peer hoặc validation payload/state.
+
+## M2 — TLS 1.3 security foundation (2026-11-16)
+
+Preflight tại worktree Codex: feat/core-network sạch ở 55e1072c5aca0df84b90ceda6bf5b2199607300d, fetch origin thành công. Đã đọc code protocol, không thấy lỗi nghiêm trọng cần sửa; giữ nguyên protocol và test M1. M1 CI đã success 3 OS theo [run 43883946559](https://github.com/Hermess1309/doan4/actions/runs/43883946559).
+
+Thêm 6 class crypto và test tự sinh identity bằng JDK keytool trong thư mục tạm; profile/key loading, TLS13-only mutual auth, certificate pin, UUID session và gated streams. Không sửa desktop/UI_SPEC, core, relay hoặc build system. API/mô hình xác minh và lệnh keytool tại SECURITY.md. Không triển khai M3.
+
+Đã chạy thực trên Windows 11 amd64, Temurin JDK 21.0.13+9, Gradle 9.2.1, dùng JAVA_HOME/GRADLE_USER_HOME portable như mục M1:
+
+```powershell
+.\gradlew.bat --offline --no-daemon --console=plain :crypto:test
+.\gradlew.bat --offline --no-daemon --console=plain :spotlessApply :crypto:spotlessApply
+.\gradlew.bat --offline --no-daemon --console=plain spotlessCheck
+.\gradlew.bat --offline --no-daemon --console=plain clean build
+```
+
+Tất cả PASS. Crypto 16/16 test (15 test M2 + smoke M0); toàn dự án 62/62, 0 failure/error/skipped; clean build thực thi 52 task. Đã đọc XML của cả 6 module và rà source/output không log secrets. Không dùng cert/secret cá nhân, không sửa/xóa test M1, không thay build dependency. Test bao gồm localhost TLS13 mutual auth, pin sai hai chiều, cert đổi, chưa verify không có TLS/app bytes, truyền binary nhỏ sau verify, stale UUID, explicit reject, timeout/cancel, expired/weak cert, wrong password/path/oversize PKCS12, missing client cert, TLS12 rejection và không emit console/JUL log.
+
+Kết quả CI M2 sau push được báo theo SHA trong phản hồi; tại thời điểm ghi log này mới xác minh Windows local. Chưa chạy relay byte tunnel, demo hai máy, UI hoặc file transfer. Những giới hạn và yêu cầu core M3 được ghi tại SECURITY.md; không tự bắt đầu M3.
