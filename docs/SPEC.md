@@ -4,7 +4,7 @@
 
 Sinh viên làm cá nhân trong 15 ngày làm việc, 3–4 giờ/ngày (45–60 giờ), có Codex phụ trách backend và Antigravity phụ trách desktop. Mục tiêu: demo truyền file thực trên Windows và Linux, có test và bằng chứng kiểm chứng bảo mật. macOS là nền tảng CI build, chưa phải cam kết demo.
 
-M0/M1 đã hoàn tất; M2 hiện thực nền tảng TLS 1.3 và xác minh fingerprint theo yêu cầu mới. Truyền file, resume, relay và UI tích hợp vẫn chưa triển khai. Không tự chuyển sang M3.
+M0–M2 đã hoàn tất; M3 hiện thực truyền một file thật qua TLS 1.3 và CLI localhost. Resume, relay và UI tích hợp vẫn chưa triển khai. Không tự chuyển sang M4.
 
 ## Kiến trúc
 
@@ -46,7 +46,7 @@ Reject kết thúc offer; cancel, timeout, lỗi I/O hoặc lỗi hash đưa tra
 
 ## Ranh giới API core cho desktop
 
-M0 chưa phát hành API transfer. M3 cần public API cho kết nối, nhận offer, accept/reject, gửi file, cancel và progress callback; M4 bổ sung resume theo thiết kế đã review. Adapter desktop chỉ thấy kiểu public của core và JDK, không gọi trực tiếp relay/crypto/protocol.
+M3 đã phát hành public API nhỏ gọn cho direct connect/listen, xác minh phiên, nhận offer, accept/reject, gửi/nhận file và progress callback (CORE_API.md). Đóng connection chỉ là network abort; cancel/resume hoàn chỉnh thuộc M4. Adapter desktop chỉ thấy kiểu public của core và JDK, không gọi trực tiếp relay/crypto/protocol.
 
 Callback dự kiến cung cấp transfer ID, state, bytes đã xử lý, tổng bytes và lỗi có kiểu. Progress đơn điệu trong một lần truyền; completion chỉ sau hash và hoàn tất file. Callback có thể chạy trên worker thread, UI phải chuyển sang EDT bằng `SwingUtilities.invokeLater`; core không phụ thuộc Swing. Chốt quy tắc threading/lifetime và thông báo thay đổi API trước khi Antigravity tích hợp.
 
@@ -106,4 +106,26 @@ Pending verification diễn ra trước TLS: chưa có certificate remote thực
 
 Stream ứng dụng chỉ được cấp sau handshake và kiểm tra certificate thực tế của SSLSession; không expose socket/session JSSE thô. Snapshot có state, local/remote fingerprints, protocol/cipher và UUID; không chứa keys/password. Mỗi connection dùng context/state mới, không tự áp dụng xác minh cũ khi đổi cert hoặc reconnect. Lỗi đóng socket; close từ UI có thể hủy handshake.
 
-Đây là crypto API để core tích hợp tại M3; chưa thay public API core hoặc thêm P2pEngine. Desktop tiếp tục chỉ gọi core. SO_TIMEOUT hiện giới hạn từng read; deadline handshake/chờ người dùng, connect timeout và giới hạn số phiên thuộc core sau này. TLS localhost được kiểm thử ở M2; byte tunnel relay thực và demo Windows/Linux hai máy thuộc M6/M8.
+Crypto M2 hiện đã được bọc qua public core API M3; chưa thêm P2pEngine async đầy đủ. Desktop tiếp tục chỉ gọi core. SO_TIMEOUT hiện giới hạn từng read; deadline handshake/chờ người dùng, connect timeout và giới hạn số phiên thuộc core sau này. TLS localhost được kiểm thử ở M2; byte tunnel relay thực và demo Windows/Linux hai máy thuộc M6/M8.
+
+## Truyền file M3 — payload và state contract
+
+Framing/version/type IDs M1 giữ nguyên. FilePayloads bổ sung schema binary big-endian trong payload, không Java serialization. Giới hạn file 16 GiB, chunk 1–65.536 byte, offset/size long không âm; tên display UTF-8 strict 1–255 byte là portable basename, từ chối separators, traversal, absolute/drive/ADS, control chars, tên Windows reserved và trailing dot/space. Tên remote không quyết định đường dẫn đích.
+
+| Message | Payload M3 |
+| --- | --- |
+| OFFER | UUID 16 byte + size i64 8 byte + SHA-256 32 byte + nameLength u16 + UTF-8 name |
+| ACCEPT / REJECT / ERROR | UUID 16 byte; ERROR được parse như lỗi, không gửi diagnostics tùy ý |
+| CHUNK | UUID 16 byte + offset i64 8 byte + data 1–64 KiB |
+| COMPLETE | UUID 16 byte + size i64 8 byte + SHA-256 32 byte; dùng hai chiều theo state |
+| CANCEL / RESUME_* | Chưa được xử lý ở M3, không tự bật tính năng |
+
+Một phiên một file: verify theo M2 -> sender hash trước trên file handle -> OFFER -> receiver validate và chờ user chọn đích/accept/reject -> ACCEPT -> CHUNK đúng UUID/offset, không vượt size -> sender COMPLETE -> receiver kiểm tra size/hash trên file tạm -> publish -> receiver COMPLETE xác nhận -> sender mới success. Type/size/UUID/offset/state sai, EOF thiếu hoặc hash mismatch đều fail, đóng connection và dọn temp; không resync/resume.
+
+Nguồn mở regular file với NOFOLLOW_LINKS, hash trước và hash lại trong lúc gửi trên cùng handle, phát hiện thay đổi kích thước/nội dung trước COMPLETE. Không hứa atomic snapshot chống tiến trình local độc hại. Receiver kiểm tra bytes, force và đọc lại file tạm để hash trước publish. Buffer 64 KiB và frame hữu hạn, không đọc toàn bộ file vào RAM.
+
+Đường dẫn đích là Path cục bộ đầy đủ do receiver chọn, parent có sẵn và được tin cậy; không ghép raw path từ mạng. File tạm ở cùng parent, final entry được tạo bằng Files.createLink không có replace rồi xóa tên tạm. Không dùng ATOMIC_MOVE vì hành vi target đã tồn tại có thể replace theo provider; filesystem không hỗ trợ hard links sẽ fail closed. Đây là atomic no-replace visibility trên filesystem được hỗ trợ, không phải bảo đảm crash durability/distributed commit.
+
+Nếu ACK mất sau publication hoặc cleanup tên tạm gặp lỗi, file hợp lệ có thể đã hiện diện dù sender/operation báo lỗi; không tự retry/ghi đè. Các quy tắc quyền thư mục cục bộ/endpoint của SECURITY vẫn áp dụng; không bảo vệ chống tiến trình local có quyền thay thế parent/temp. M3 chưa có quota, wall-clock deadline hay resume/cancel handshake.
+
+Public API thật và mapping với đề xuất Antigravity tại [CORE_API](CORE_API.md), lệnh CLI tại [DEMO](DEMO.md). Callback trên caller worker, progress khoảng 100ms; bytes==total chưa có nghĩa hoàn tất. Chưa triển khai P2pEngine async đầy đủ, relay, queue hoặc UI.

@@ -59,3 +59,19 @@ PinnedTrustManager không chỉ so pin: kiểm tra profile/chữ ký/thời hạ
 PeerTlsSession sở hữu socket, gate mọi stream operation, không trả raw JSSE socket/session; snapshot metadata không tự cấp quyền truyền. Verification/handshake/I/O failure đóng phiên; close có thể hủy handshake. Local TLS completion không chứng minh remote đã xác minh xong/accept offer (flight cuối TLS1.3 có thể còn được server xử lý). M3 phải xử lý alerts, EOF và protocol errors, chỉ truyền sau state VERIFIED và offer accepted.
 
 M2 diff có thể vượt mục tiêu mềm 500 dòng vì identity validation, six TrustManager entry points, lifecycle/cancel gate và negative tests phải được review cùng nhau; không thêm chức năng M3. Xem SECURITY.md về keytool, API, các test và giới hạn timeout/OS permissions.
+
+## D011 — M3 single-file blocking core và payload schema (2026-11-16)
+
+Tái sử dụng M1 envelope và M2 strict pre-pin TLS, không sửa crypto/trust policy. Thêm FilePayloads với OFFER/controls/CHUNK/COMPLETE; không thêm message ID. COMPLETE chiều sender là end-of-data; chiều receiver chỉ được gửi sau disk hash + publication. Sender chờ ACK trước success để tránh coi write socket thành công là file đã lưu.
+
+Core dùng PeerNode/PeerListener/TransferSession và DTO core-only; chưa dựng đầy đủ P2pEngine async/relay/resume. Đã đọc interface đề xuất trong branch Antigravity: boolean confirm sau handshake sẽ deadlock/đi ngược M2. Adapter phải nhập trusted pin trước handshake, verify trên worker và map VERIFIED -> READY. Accept nhận đường dẫn file cục bộ đầy đủ thay vì tự dùng remote filename. Bảng mapping tại CORE_API.md, không sửa desktop/UI_SPEC.
+
+Chọn 64 KiB buffer/chunk, max file 16 GiB để giới hạn metadata/offset và vẫn cho test 1 GiB. Hash nguồn trước offer và trong quá trình send trên cùng descriptor; receiver đọc lại temp sau force. Chi phí thêm I/O được chấp nhận để có hash kỳ vọng từ đầu và kiểm chứng file thực trên đĩa.
+
+## D012 — No-overwrite publication và giới hạn M3 (2026-11-16)
+
+Không dùng Files.move(ATOMIC_MOVE) do đích tồn tại có hành vi provider-dependent; dùng createLink(final, temp) rồi xóa temp trong cùng trusted local directory. Tạo final entry fail nếu đã có file/link kể cả xuất hiện sau khi check trước đó. Hard link không hỗ trợ -> fail closed, không fallback copy vào final chưa hoàn tất hoặc replace. Quyền OS/parent/temp vẫn thuộc trusted receiver, endpoint compromise ngoài threat model. Link publication không đồng nghĩa crash-safe fsync parent hoặc exactly-once hai máy.
+
+ACK có thể mất sau final entry đã tạo; khi đó receiver có file hợp lệ nhưng sender fail. Lỗi cleanup sau link cũng có thể để lại final hợp lệ. Không xóa final, không retry/overwrite tự động. Partial temp được dọn khi lỗi trong điều kiện OS cho phép; không claim resume M4. Progress observer RuntimeException được cô lập; completion chỉ sau hash/publication và ACK, không từ tỷ lệ phần trăm.
+
+M3 diff vượt mục tiêu mềm 500 dòng vì schema + public core boundary + streaming filesystem lifecycle + CLI và negative TLS integration tests là một milestone được yêu cầu; không thêm thư viện/build plugin hay chức năng M4. Test 1 GiB tách bằng P2P_LARGE_TEST=1, mặc định skip trên CI.

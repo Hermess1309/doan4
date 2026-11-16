@@ -4,10 +4,10 @@
 
 | Ngày | Mốc | Đầu ra và kiểm chứng | Trạng thái |
 | --- | --- | --- | --- |
-| 1 | M0 | Khung, tài liệu, 6 smoke test, CI 3 OS | Xong cục bộ; CI chưa chạy |
+| 1 | M0 | Khung, tài liệu, 6 smoke test, CI 3 OS | PASS local + CI 3 OS |
 | 2 | M1 | Frame/codec; bounded length, partial read/EOF, malformed input | PASS local + CI 3 OS |
-| 3 | M2 | Identity, TLS 1.3, pinning hai chiều, negative tests | PASS Windows; chờ review |
-| 4–5 | M3 | Offer/accept/reject, streaming/chunk, hash, progress API | Chưa bắt đầu |
+| 3 | M2 | Identity, TLS 1.3, pinning hai chiều, negative tests | PASS local + CI 3 OS |
+| 4–5 | M3 | Offer/accept/reject, streaming/chunk, hash, progress API | PASS Windows + CLI + 1 GiB; chờ review |
 | 6 | M4 | Cancel, disconnect, resume an toàn và negative tests | Chưa bắt đầu |
 | 7 | M5 | Demo LAN hai peer, timeout và lỗi filesystem | Chưa bắt đầu |
 | 8–9 | M6 | Pairing, relay byte hai chiều, TLS xuyên relay | Chưa bắt đầu |
@@ -92,3 +92,27 @@ Thêm 6 class crypto và test tự sinh identity bằng JDK keytool trong thư m
 Tất cả PASS. Crypto 16/16 test (15 test M2 + smoke M0); toàn dự án 62/62, 0 failure/error/skipped; clean build thực thi 52 task. Đã đọc XML của cả 6 module và rà source/output không log secrets. Không dùng cert/secret cá nhân, không sửa/xóa test M1, không thay build dependency. Test bao gồm localhost TLS13 mutual auth, pin sai hai chiều, cert đổi, chưa verify không có TLS/app bytes, truyền binary nhỏ sau verify, stale UUID, explicit reject, timeout/cancel, expired/weak cert, wrong password/path/oversize PKCS12, missing client cert, TLS12 rejection và không emit console/JUL log.
 
 Kết quả CI M2 sau push được báo theo SHA trong phản hồi; tại thời điểm ghi log này mới xác minh Windows local. Chưa chạy relay byte tunnel, demo hai máy, UI hoặc file transfer. Những giới hạn và yêu cầu core M3 được ghi tại SECURITY.md; không tự bắt đầu M3.
+## M3 — Secure single-file transfer (2026-11-16)
+
+Preflight đúng Do_an_4-codex/feat/core-network, HEAD M2 2f5ac27c50903e5a7ff885b53499d3b99f72aa8c, working tree sạch, fetch origin thành công. Đã đọc protocol/crypto thực tế và API đề xuất của Antigravity từ feat/desktop-ui (read-only). CI M2 run 43888321036 có ba job Windows/Ubuntu/macOS success khi kiểm tra. Không merge main hoặc sửa desktop/UI_SPEC.
+
+Đã thêm FilePayloads, public core API và helper streaming/publication, CLI thật, unit/integration tests, CORE_API.md và DEMO.md. Không đổi dependency, build system hoặc crypto. UI API cần chỉnh thứ tự xác minh trước handshake và chạy verify async; mapping đã thông báo tại CORE_API.md.
+
+Các lệnh đã chạy với JDK/cache portable như mục M1:
+
+```powershell
+.\gradlew.bat --offline --no-daemon --console=plain :protocol:compileJava :core:compileJava :cli:compileJava
+.\gradlew.bat --offline --no-daemon --console=plain :protocol:test :core:test
+$env:P2P_LARGE_TEST = '1'
+try {
+    .\gradlew.bat --offline --no-daemon --console=plain :core:test --tests 'vn.edu.p2p.core.SecureFileTransferTest.optionalOneGiBStreaming' :cli:installDist
+} finally {
+    Remove-Item Env:\P2P_LARGE_TEST
+}
+```
+
+Các bước trên PASS trên Windows 11/JDK21. Suite core mặc định kiểm tra 10 MiB, và test riêng optionalOneGiBStreaming đã chạy PASS với file 1.073.741.824 byte, so sánh Files.mismatch + SHA-256 độc lập hai file, data sinh tạm/cleanup bởi JUnit. Bài 1 GiB không bật mặc định trên CI. Không đo peak RAM/benchmark đa máy; code dùng buffer 64 KiB/frame hữu hạn.
+
+Demo hai tiến trình CLI Java độc lập đã chạy thực bằng identity riêng sinh ngẫu nhiên trong .tools (Git ignore), password truyền qua tên env chỉ cho subprocess, không hardcode/commit/log. Receiver nghe port do OS cấp, sender kết nối 127.0.0.1, cả hai VERIFIED TLSv1.3, truyền 1.048.576 byte; sender/receiver exit 0 và SUCCESS, hash nguồn/đích cùng 694787E0CE4DD09DA50FEAC8920718ED497AE137280D2E68272934D1D3D93DDF. Log bằng chứng cục bộ ở .tools/m3-demo-39631c151bda414e8ff211d3ff9ffebb, không commit keys/log/data. Đã xóa biến password khỏi môi trường sau demo.
+
+Clean build cuối đã chạy: .\gradlew.bat --offline --no-daemon --console=plain clean spotlessCheck build :cli:installDist. PASS, 53 task thực thi; XML toàn dự án 106 case = 105 PASS, 0 failure/error, 1 SKIP có chủ đích (1 GiB). Riêng protocol có 59 PASS, core có 27 PASS + 1 SKIP. M3 bổ sung 43 case mặc định pass; bài 1 GiB đã bật chạy riêng PASS trước clean build. Tất cả test M1/M2 giữ nguyên và pass. Đã kiểm tra source không Swing/object serialization/readAllBytes trong core/protocol, API công khai không lộ crypto types, diff không sửa desktop/UI_SPEC/crypto/build system. Không bắt đầu M4. Các rủi ro publication/ACK mất, local directory trust, timeout/hash cost và API handoff đã ghi trong SPEC/CORE_API/DEMO.

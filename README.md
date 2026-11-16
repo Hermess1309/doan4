@@ -2,7 +2,7 @@
 
 Đồ án 4: ứng dụng truyền tệp ngang hàng đa nền tảng, mã hóa đầu cuối bằng TLS 1.3 giữa hai peer. Java 21, Gradle multi-module; desktop dự kiến dùng Swing + FlatLaf. Repository chính thức: [Hermess1309/doan4](https://github.com/Hermess1309/doan4).
 
-**Trạng thái M2:** có binary frame codec, nền tảng JSSE TLS 1.3/pinning và test localhost thật. Chưa có P2pEngine/CLI kết nối, truyền file, relay hoạt động hoặc UI. Hướng dẫn identity và xác minh tại [SECURITY](docs/SECURITY.md). Không dùng scaffold này để truyền dữ liệu thật.
+**Trạng thái M3:** đã truyền file thật qua TLS 1.3 localhost bằng core/CLI, có accept/reject, streaming, SHA-256 và no-overwrite. Chưa có resume, relay hoặc UI tích hợp. [Demo hai peer](docs/DEMO.md), [API core](docs/CORE_API.md), [bảo mật/identity](docs/SECURITY.md).
 
 ## Chuẩn bị
 
@@ -29,7 +29,7 @@ chmod +x gradlew
 ./gradlew :cli:run :desktop:run
 ```
 
-Hai lệnh `run` chỉ in thông báo M0 rồi thoát, không mở cửa sổ hay socket. Relay chưa có entry point. `build` chạy test và Spotless ở cả 6 module; `:core:test` chạy riêng test core. `spotlessApply` sửa khoảng trắng, tab, thứ tự import và newline Java; M0 chưa dùng formatter Java bên ngoài.
+Lệnh cli:run không có args hiển thị help; desktop:run vẫn là placeholder M0 trong branch Codex. Demo tương tác dùng cli:installDist và launcher như DEMO.md, không dùng Gradle run để nhập password. Relay chưa có entry point. `build` chạy test và Spotless ở cả 6 module; `:core:test` chạy riêng test core. `spotlessApply` sửa khoảng trắng, tab, thứ tự import và newline Java; M0 chưa dùng formatter Java bên ngoài.
 
 Báo cáo test tại `<module>/build/reports/tests/test/index.html`, XML tại `<module>/build/test-results/test/`. CI cấu hình Ubuntu, Windows, macOS với JDK 21 và lưu test report; trạng thái thực thi ghi trong [TASKS](docs/TASKS.md).
 

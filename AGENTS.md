@@ -1,7 +1,7 @@
 # Hướng dẫn cộng tác
 
-- Java 21, Gradle Wrapper; chỉ thực hiện milestone được người dùng yêu cầu. Hiện tại là M2 (crypto/TLS); không tự chuyển sang M3.
-- M2 chỉ triển khai crypto/TLS foundation và tài liệu backend được giao. Không triển khai file transfer, resume, relay server hoặc UI; không sửa protocol nếu chưa báo vấn đề nghiêm trọng.
+- Java 21, Gradle Wrapper; chỉ thực hiện milestone được người dùng yêu cầu. Hiện tại là M3 (secure file transfer); không tự chuyển sang M4.
+- M3 chỉ triển khai protocol payload tối thiểu, core single-file streaming, CLI localhost và tài liệu backend. Giữ mô hình pre-pin M2; không triển khai resume, relay, discovery hoặc UI.
 - Codex sở hữu `protocol/`, `crypto/`, `core/`, `relay/`, `cli/`, build, CI, file này và `docs/{SPEC,TASKS,DECISIONS}.md`.
 - Antigravity sở hữu `desktop/` và `docs/UI_SPEC.md`. M0 được phép bootstrap placeholder/test/build của desktop; sau đó không sửa nếu chưa có yêu cầu. Không tạo UI_SPEC thay Antigravity.
 - `desktop` chỉ gọi public API của `core`. `core` không import Swing/AWT, `protocol` không phụ thuộc UI. Không tạo dependency vòng.

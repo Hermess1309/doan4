@@ -1,6 +1,6 @@
 # Nền tảng bảo mật M2
 
-M2 cung cấp identity và kênh TLS cho core; chưa có P2pEngine, lệnh kết nối CLI, truyền file hoặc relay server. Không chỉnh desktop. Hướng dẫn này mô tả đúng API hiện tại, không hứa một kênh đã xác thực khi người dùng chưa kiểm tra fingerprint.
+M2 cung cấp identity/kênh TLS; M3 đã tích hợp vào core và CLI truyền file localhost (xem CORE_API.md/DEMO.md). Chưa có P2pEngine async đầy đủ hoặc relay server. Không chỉnh desktop. Hướng dẫn này mô tả đúng API hiện tại, không hứa một kênh đã xác thực khi người dùng chưa kiểm tra fingerprint.
 
 ## Tạo identity trên Windows với JDK 21
 
@@ -84,3 +84,5 @@ Test tự sinh keystore cho các identity khác nhau bằng keytool JDK ở @Tem
 SO_TIMEOUT là giới hạn chờ từng read, không phải deadline toàn bộ handshake. Connect timeout, deadline chờ người dùng, giới hạn số connection/slowloris, UI integration, truyền file, resume, relay và kiểm thử hai máy thật chưa thuộc M2. Caller dùng một reader/một writer, close khi EOF hoặc framing failure; không ghi raw transport sau khi giao quyền sở hữu cho session. TLS không bảo vệ file trên đĩa, endpoint bị xâm nhập hoặc người dùng xác minh nhầm fingerprint.
 
 Nguồn chuẩn: [keytool JDK 21](https://docs.oracle.com/en/java/javase/21/docs/specs/man/keytool.html), [SSLSocketFactory layering](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/javax/net/ssl/SSLSocketFactory.html), [X509ExtendedTrustManager](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/javax/net/ssl/X509ExtendedTrustManager.html), [X509Certificate](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/security/cert/X509Certificate.html).
+
+M3 giữ nguyên toàn bộ mô hình pre-pin/TLS M2. File transfer không thay thế pinning; full schema/state/đường dẫn và no-overwrite tại SPEC/CORE_API. CLI chỉ hỗ trợ password console hoặc tên biến môi trường do người dùng chỉ định, không nhận giá trị password trong argv. Chỉ file đã hash/size đúng mới được công bố; data trên đĩa không được TLS mã hóa sau khi lưu.
