@@ -4,6 +4,7 @@ plugins {
 
 dependencies {
     implementation(project(":core"))
+    implementation("com.formdev:flatlaf:3.5.4")
 }
 
 application {
