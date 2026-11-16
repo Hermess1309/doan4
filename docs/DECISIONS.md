@@ -36,7 +36,7 @@ Progress callback của core chạy trên worker, UI marshal sang EDT; cần ch�
 
 ## D008 — Tính khả thi 15 ngày (chấp nhận)
 
-Ưu tiên một file/phiên, đường dẫn đích do receiver chọn, không ghi đè, SHA-256 trước completion. Cắt discovery, lịch sử, animation, hàng đợi nếu thiếu thời gian. CI kiểm tra 3 OS; demo sản phẩm bắt buộc Windows/Linux. Chỉ ghi pass khi có lệnh/kết quả thực tế; M0 không thể xác minh tính an toàn của thiết kế chưa có code.
+Ưu tiên một file/phiên, đường dẫn đích do receiver chọn, không ghi đè, SHA-256 trước completion. Cắt discovery, lịch sử, animation, hàng đợi nếu thiếu thời gian. CI trước cập nhật kiểm tra 3 OS; theo D013 hiện chỉ Windows/Ubuntu, demo bắt buộc Windows 10/11 và Ubuntu Linux. Chỉ ghi pass khi có lệnh/kết quả thực tế; M0 không thể xác minh tính an toàn của thiết kế chưa có code.
 
 ## D009 — Chốt binary envelope M1 (2026-11-16, triển khai theo yêu cầu M1)
 
@@ -75,3 +75,13 @@ Không dùng Files.move(ATOMIC_MOVE) do đích tồn tại có hành vi provider
 ACK có thể mất sau final entry đã tạo; khi đó receiver có file hợp lệ nhưng sender fail. Lỗi cleanup sau link cũng có thể để lại final hợp lệ. Không xóa final, không retry/overwrite tự động. Partial temp được dọn khi lỗi trong điều kiện OS cho phép; không claim resume M4. Progress observer RuntimeException được cô lập; completion chỉ sau hash/publication và ACK, không từ tỷ lệ phần trăm.
 
 M3 diff vượt mục tiêu mềm 500 dòng vì schema + public core boundary + streaming filesystem lifecycle + CLI và negative TLS integration tests là một milestone được yêu cầu; không thêm thư viện/build plugin hay chức năng M4. Test 1 GiB tách bằng P2P_LARGE_TEST=1, mặc định skip trên CI.
+
+## D013 — Chốt Windows 10/11 + Ubuntu, bỏ macOS khỏi MVP/CI (2026-11-16)
+
+Theo chỉ đạo người dùng sau khi M3 hoàn tất (f2037d6, CI run 43894605508 success), chỉ hai họ nền tảng mục tiêu: Windows 10/11 và Ubuntu Linux. Matrix mới chính xác ubuntu-latest/windows-latest; Java 21 không đổi. Các log M0–M3 có macOS là bằng chứng lịch sử, không còn là nghĩa vụ CI/nghiệm thu hiện hành. Không thêm tính năng riêng macOS hoặc Windows-only API vào core.
+
+CI tạo cả CLI/desktop distributions, smoke launcher Unix/.bat; Ubuntu có Xvfb để chạy smoke UI khi desktop thật được tích hợp. Ubuntu runner-image công bố xvfb trong [installed software](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md). Build, launcher smoke, localhost TLS integration và GUI/mạng hai máy là các mức bằng chứng khác nhau; không suy diễn Windows 10/11 hoặc GUI thật từ tên runner.
+
+Đã rà chỉ đọc source branch feat/desktop-ui: Swing/FlatLaf/JDK, không thấy command/API Windows riêng; DesktopApplication có --smoke-test và nhánh headless tường minh. Branch Codex hiện vẫn chứa desktop placeholder, không merge/chỉnh desktop/UI_SPEC. Ubuntu GUI thực và adapter transfer sau tích hợp vẫn phải nghiệm thu; Xvfb/CI không thay thế desktop session thật.
+
+Giữ đủ bốn kịch bản Windows->Ubuntu, Ubuntu->Windows, Windows->Windows, hai mạng qua relay, với TLS1.3/pin/SHA-256 mỗi lần. Relay tiếp tục M6, không bị giảm phạm vi. Dùng NTFS/ext4 hoặc filesystem đã xác minh hard-link no-replace; không thêm fallback ghi đè hoặc thay security model M2/M3.

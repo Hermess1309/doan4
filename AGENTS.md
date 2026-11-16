@@ -1,5 +1,6 @@
 # Hướng dẫn cộng tác
 
+- Nền tảng bắt buộc: Windows 10/11 và Ubuntu Linux; CI chỉ ubuntu-latest/windows-latest, không thêm Windows-only API vào core hoặc tính năng riêng macOS. CI/localhost không thay demo hai máy; giữ relay E2E, fingerprint và SHA-256. Không sửa phần Antigravity trong task phạm vi/CI này.
 - Java 21, Gradle Wrapper; chỉ thực hiện milestone được người dùng yêu cầu. Hiện tại là M3 (secure file transfer); không tự chuyển sang M4.
 - M3 chỉ triển khai protocol payload tối thiểu, core single-file streaming, CLI localhost và tài liệu backend. Giữ mô hình pre-pin M2; không triển khai resume, relay, discovery hoặc UI.
 - Codex sở hữu `protocol/`, `crypto/`, `core/`, `relay/`, `cli/`, build, CI, file này và `docs/{SPEC,TASKS,DECISIONS}.md`.

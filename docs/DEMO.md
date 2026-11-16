@@ -75,3 +75,51 @@ try {
 ```
 
 Test dữ liệu lớn tự sinh tại @TempDir, giữ buffer cố định; không có file test lớn hoặc keystore cố định trong Git. Suite mặc định có 10 MiB và một case 1 GiB skip có chủ đích; test riêng bật env đã được chạy local, bằng chứng ghi tại TASKS.md.
+
+## Ubuntu Linux — launcher và truyền hai máy (phạm vi bắt buộc)
+
+Cài **JDK 21 đầy đủ có hỗ trợ desktop**, đặt JAVA_HOME và bin trong PATH. Chạy từ checkout đã review, không mang keystore/private key từ máy Windows sang máy Ubuntu.
+
+```bash
+export PATH="$JAVA_HOME/bin:$PATH"
+java -version
+chmod +x gradlew
+./gradlew --no-daemon --console=plain clean spotlessCheck build :cli:installDist :desktop:installDist
+./cli/build/install/cli/bin/cli help
+
+umask 077
+identity_dir="${XDG_DATA_HOME:-$HOME/.local/share}/p2p-file-transfer"
+mkdir -p "$identity_dir"
+store="$identity_dir/identity.p12"
+if [ ! -e "$store" ]; then
+    "$JAVA_HOME/bin/keytool" -genkeypair -alias peer -storetype PKCS12 -keystore "$store" -keyalg RSA -keysize 3072 -sigalg SHA256withRSA -validity 365 -dname "CN=Ubuntu Peer" -ext "BC=ca:false" -ext "KU=digitalSignature" -ext "EKU=serverAuth,clientAuth"
+fi
+./cli/build/install/cli/bin/cli fingerprint --store "$store"
+```
+
+Đối chiếu full pin qua kênh độc lập trước handshake như M2. Password vẫn nhập console. Ví dụ **Ubuntu nhận từ Windows**:
+
+```bash
+read -r -p 'Full trusted fingerprint of Windows peer: ' peer_pin
+read -r -p 'New absolute destination FILE path: ' destination
+./cli/build/install/cli/bin/cli receive --store "$store" --pin "$peer_pin" --host 0.0.0.0 --port 9000 --output "$destination" --timeout-ms 120000
+sha256sum -- "$destination"
+```
+
+Máy Windows gửi dùng lệnh send đã hướng dẫn nhưng --host phải là IP LAN thực của Ubuntu, không phải 127.0.0.1/0.0.0.0. Cho phép TCP port đã chọn theo cấu hình mạng/firewall demo; không tự động đổi firewall trong ứng dụng.
+
+Đảo chiều **Ubuntu gửi sang Windows**: Windows chạy receive với --host 0.0.0.0, chọn output mới; Ubuntu dùng:
+
+```bash
+read -r -p 'Full trusted fingerprint of Windows peer: ' peer_pin
+read -r -p 'Windows receiver LAN IP: ' receiver_ip
+read -r -p 'Existing absolute source FILE path: ' source
+./cli/build/install/cli/bin/cli send --store "$store" --pin "$peer_pin" --host "$receiver_ip" --port 9000 --file "$source" --timeout-ms 120000
+sha256sum -- "$source"
+```
+
+Windows->Windows làm tương tự với receiver bind LAN và host IP đúng. Các lệnh trên là hướng dẫn, **chưa phải bằng chứng đã chạy hai host**. Chụp/lưu OS version, Java version, SHA commit, TLSv1.3/peer fingerprints, bytes và hash hai phía theo checklist TASKS. Không dùng một runner Ubuntu hoặc localhost làm bằng chứng liên hệ điều hành.
+
+Desktop Ubuntu: chạy ./desktop/build/install/desktop/bin/desktop trong desktop session X11/XWayland có display và fonts; --smoke-test chỉ kiểm tra khởi tạo khi implementation UI có mặt. Branch Codex hiện là placeholder, UI thật thuộc Antigravity và cần review/tích hợp rồi kiểm thử cửa sổ, file chooser, EDT và transfer thật. Không chỉnh desktop trong task phạm vi này.
+
+Relay hai mạng: chờ M6 triển khai signaling/byte tunnel và CLI/API relay rồi thêm lệnh demo cụ thể. Không giả lập một lệnh connectRelay đã chạy khi chưa có backend; đây vẫn là tiêu chí bắt buộc, TLS kết thúc ở peer, pinning và SHA-256 giữ nguyên.

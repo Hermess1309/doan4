@@ -2,7 +2,7 @@
 
 ## Phạm vi và trạng thái
 
-Sinh viên làm cá nhân trong 15 ngày làm việc, 3–4 giờ/ngày (45–60 giờ), có Codex phụ trách backend và Antigravity phụ trách desktop. Mục tiêu: demo truyền file thực trên Windows và Linux, có test và bằng chứng kiểm chứng bảo mật. macOS là nền tảng CI build, chưa phải cam kết demo.
+Sinh viên làm cá nhân trong 15 ngày làm việc, 3–4 giờ/ngày (45–60 giờ), có Codex phụ trách backend và Antigravity phụ trách desktop. Mục tiêu bắt buộc: CLI/desktop và demo truyền file thật trên Windows 10/11 và Ubuntu Linux, có test và bằng chứng bảo mật. macOS ngoài phạm vi MVP 15 ngày; CI chỉ Windows/Ubuntu.
 
 M0–M2 đã hoàn tất; M3 hiện thực truyền một file thật qua TLS 1.3 và CLI localhost. Resume, relay và UI tích hợp vẫn chưa triển khai. Không tự chuyển sang M4.
 
@@ -52,7 +52,7 @@ Callback dự kiến cung cấp transfer ID, state, bytes đã xử lý, tổng 
 
 ## Tiêu chí nghiệm thu theo giai đoạn
 
-- M0: Wrapper + Java 21, đủ module, 6 smoke test, format/build pass, CI 3 OS và tài liệu đúng phạm vi.
+- M0: Wrapper + Java 21, đủ module, 6 smoke test, format/build pass, CI Windows/Ubuntu theo phạm vi đã chốt và tài liệu đúng phạm vi.
 - M1: round-trip, frame quá lớn, malformed frame, partial read, EOF và version không hỗ trợ.
 - M2: TLS 1.3 thật, hai chiều pin đúng, sai/thiếu chứng chỉ hoặc fingerprint bị từ chối; không có trust-all.
 - M3–M5: file rỗng/nhỏ/lớn, streaming, accept/reject, hash mismatch, path traversal, file đích tồn tại, timeout, disconnect, cancel và metadata resume sai.
@@ -129,3 +129,21 @@ Nguồn mở regular file với NOFOLLOW_LINKS, hash trước và hash lại tro
 Nếu ACK mất sau publication hoặc cleanup tên tạm gặp lỗi, file hợp lệ có thể đã hiện diện dù sender/operation báo lỗi; không tự retry/ghi đè. Các quy tắc quyền thư mục cục bộ/endpoint của SECURITY vẫn áp dụng; không bảo vệ chống tiến trình local có quyền thay thế parent/temp. M3 chưa có quota, wall-clock deadline hay resume/cancel handshake.
 
 Public API thật và mapping với đề xuất Antigravity tại [CORE_API](CORE_API.md), lệnh CLI tại [DEMO](DEMO.md). Callback trên caller worker, progress khoảng 100ms; bytes==total chưa có nghĩa hoàn tất. Chưa triển khai P2pEngine async đầy đủ, relay, queue hoặc UI.
+
+## Phạm vi hệ điều hành đã chốt sau M3 (2026-11-16)
+
+Nền tảng MVP bắt buộc: **Windows 10/11 và Ubuntu Linux**. macOS không thuộc phạm vi nghiệm thu/CI của MVP 15 ngày; không phát triển tính năng riêng macOS. Giữ Java 21, JSSE/TLS 1.3, portable Path/Socket/stream API; không thêm API, lệnh hệ thống hoặc native binding riêng Windows vào core. Hỗ trợ CLI và desktop trên Ubuntu là yêu cầu sản phẩm, không chỉ compile backend.
+
+CI hiện dùng đúng ubuntu-latest và windows-latest, build/test, tạo application distributions và smoke chạy launcher của CLI/desktop. Ubuntu dùng Xvfb cho smoke entry point để có display khi UI được tích hợp; Windows dùng .bat, Ubuntu dùng Unix launcher. Không thay Java toolchain hoặc implementation core. Runner windows-latest không chứng minh đã kiểm thử Windows 10/11 trên máy đích; runner Ubuntu cũng không phải một cặp máy Windows/Ubuntu trao đổi file.
+
+| Kịch bản nghiệm thu thực tế bắt buộc | Điều kiện / bằng chứng |
+| --- | --- |
+| Windows 10/11 gửi -> Ubuntu Linux nhận | Hai host riêng, receiver bind LAN interface, TLSv1.3 + full pin đúng + file size/SHA-256 khớp |
+| Ubuntu Linux gửi -> Windows 10/11 nhận | Đảo vai trò trên hai host, cùng kiểm tra accept/reject/no-overwrite |
+| Windows gửi -> Windows nhận | Ưu tiên cặp Windows 10 và Windows 11 để bao phủ cả hai phiên bản; chạy hai chiều |
+| Hai máy khác mạng qua Relay | Thực hiện sau M6, đổi vai trò khi demo; TLS vẫn giữa peer, relay chỉ pump bytes, không kết thúc TLS |
+| Negative security trong các kịch bản | Sai/đổi fingerprint phải fail; chưa xác minh không gửi file; file lỗi hash/thiếu không được báo complete |
+
+Ghi chính xác phiên bản OS/JDK, commit, hướng truyền, size, fingerprint public, TLS protocol/cipher, SHA-256 nguồn/đích và kết quả; không lưu password/private key/file content. Bao phủ file 0 byte, text UTF-8, binary nhiều chunk, 10–100 MiB; bài lớn riêng khi có tài nguyên. Windows 10 và 11 đều phải được ghi nhận khi tuyên bố đã kiểm thử hai phiên bản.
+
+M3 đã có localhost integration/CLI demo và CI, **chưa có bằng chứng truyền file giữa hai máy** cho các hàng trên. Relay chưa được triển khai; vẫn là yêu cầu bắt buộc M6, không cắt relay, E2E TLS hoặc fingerprint để rút phạm vi. GUI Ubuntu thật phải kiểm tra trên desktop session sau khi tích hợp branch Antigravity; headless/launcher placeholder không thay thế kiểm thử GUI.

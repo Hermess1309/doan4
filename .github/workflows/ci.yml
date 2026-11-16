@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -23,14 +23,25 @@ jobs:
           java-version: '21'
       - uses: gradle/actions/setup-gradle@v4
         # Includes validation of checked-in Gradle Wrapper JARs.
-      - name: Build, smoke tests and formatting
+      - name: Build, tests, formatting and launchers
         shell: bash
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon --console=plain clean spotlessCheck build
-      - name: Run M0 entry points
+          ./gradlew --no-daemon --console=plain clean spotlessCheck build :cli:installDist :desktop:installDist
+      - name: Smoke test Ubuntu launchers
+        if: runner.os == 'Linux'
         shell: bash
-        run: ./gradlew --no-daemon --console=plain :cli:run :desktop:run
+        run: |
+          ./cli/build/install/cli/bin/cli help
+          xvfb-run -a ./desktop/build/install/desktop/bin/desktop --smoke-test
+      - name: Smoke test Windows launchers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & .\cli\build\install\cli\bin\cli.bat help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\desktop\build\install\desktop\bin\desktop.bat --smoke-test
+          exit $LASTEXITCODE
       - name: Upload test evidence
         if: always()
         uses: actions/upload-artifact@v4

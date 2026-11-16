@@ -2,6 +2,8 @@
 
 15 ngày làm việc, 3–4 giờ/ngày, 45–60 giờ. Đây là ngày tương đối từ khi bắt đầu, không khẳng định đã hoàn tất theo lịch. Giảm chức năng phụ nếu thiếu thời gian, giữ yêu cầu bảo mật.
 
+Phạm vi hiện hành sau M3: Windows 10/11 và Ubuntu Linux; CI chỉ ubuntu-latest/windows-latest. Các ghi nhận CI 3 OS bên dưới là lịch sử trước quyết định D013, không yêu cầu macOS cho MVP.
+
 | Ngày | Mốc | Đầu ra và kiểm chứng | Trạng thái |
 | --- | --- | --- | --- |
 | 1 | M0 | Khung, tài liệu, 6 smoke test, CI 3 OS | PASS local + CI 3 OS |
@@ -16,7 +18,7 @@
 | 14 | M9 | Benchmark, kiểm chứng E2E và negative tests bảo mật | Chưa bắt đầu |
 | 15 | M10 | Sửa lỗi cuối, kịch bản demo và kiến thức bảo vệ | Chưa bắt đầu |
 
-## Checklist M0
+## Checklist M0 (lịch sử trước cập nhật phạm vi)
 
 - [x] Clone đúng repository; branch riêng; giữ nguyên origin; không push/merge.
 - [x] Gradle Wrapper 9.2.1, checksum distribution và kiểm tra checksum Wrapper JAR.
@@ -25,7 +27,7 @@
 - [x] README, gitignore, AGENTS, SPEC, TASKS, DECISIONS.
 - [x] Workflow Ubuntu/Windows/macOS với test report artifact.
 - [x] Xác minh build/test/format và entry point trên Windows 11, JDK 21.
-- [ ] GitHub Actions chạy thực trên cả 3 OS (cần người dùng push sau review).
+- [x] GitHub Actions đã chạy thực trên 3 OS ở M0; phạm vi CI hiện tại sau M3 chỉ Windows/Ubuntu.
 
 ## Nhật ký M0 — 2026-11-16
 
@@ -116,3 +118,33 @@ Các bước trên PASS trên Windows 11/JDK21. Suite core mặc định kiểm 
 Demo hai tiến trình CLI Java độc lập đã chạy thực bằng identity riêng sinh ngẫu nhiên trong .tools (Git ignore), password truyền qua tên env chỉ cho subprocess, không hardcode/commit/log. Receiver nghe port do OS cấp, sender kết nối 127.0.0.1, cả hai VERIFIED TLSv1.3, truyền 1.048.576 byte; sender/receiver exit 0 và SUCCESS, hash nguồn/đích cùng 694787E0CE4DD09DA50FEAC8920718ED497AE137280D2E68272934D1D3D93DDF. Log bằng chứng cục bộ ở .tools/m3-demo-39631c151bda414e8ff211d3ff9ffebb, không commit keys/log/data. Đã xóa biến password khỏi môi trường sau demo.
 
 Clean build cuối đã chạy: .\gradlew.bat --offline --no-daemon --console=plain clean spotlessCheck build :cli:installDist. PASS, 53 task thực thi; XML toàn dự án 106 case = 105 PASS, 0 failure/error, 1 SKIP có chủ đích (1 GiB). Riêng protocol có 59 PASS, core có 27 PASS + 1 SKIP. M3 bổ sung 43 case mặc định pass; bài 1 GiB đã bật chạy riêng PASS trước clean build. Tất cả test M1/M2 giữ nguyên và pass. Đã kiểm tra source không Swing/object serialization/readAllBytes trong core/protocol, API công khai không lộ crypto types, diff không sửa desktop/UI_SPEC/crypto/build system. Không bắt đầu M4. Các rủi ro publication/ACK mất, local directory trust, timeout/hash cost và API handoff đã ghi trong SPEC/CORE_API/DEMO.
+
+## Cập nhật phạm vi Windows/Ubuntu sau M3 (2026-11-16)
+
+Preflight đúng feat/core-network, M3 commit f2037d6ec924c9cf08b8137fe9bf6e98ae1e8027 sạch, fetch origin thành công. M3 CI run 43894605508 success trước khi chỉnh matrix. Task này chỉ cập nhật CI/phạm vi/hướng dẫn, không triển khai M4/M6 hoặc sửa desktop/core/crypto.
+
+Matrix mới: ubuntu-latest, windows-latest; tạo và smoke application launchers CLI/desktop, Ubuntu dùng Xvfb. Rà core/CLI và chỉ đọc source desktop branch Antigravity không thấy Windows-only runtime API/command. Java 21 và API/security/file publication giữ nguyên. Desktop placeholder trên branch Codex không được xem là UI thật đã qua QA Ubuntu.
+
+## Checklist demo Windows 10/11 — Ubuntu Linux (chưa thực thi hai máy)
+
+- [ ] Chuẩn bị JDK21 trên từng host, ghi OS release/build cụ thể; identity riêng, fingerprint đối chiếu đầy đủ qua kênh độc lập.
+- [ ] Sau tích hợp UI được review, chạy launcher/window/file chooser trên Ubuntu desktop session và Windows 10/11; callback qua EDT, không block UI.
+- [ ] Windows 10/11 -> Ubuntu: receiver bind LAN, user accept, file 0B/text/binary/nhiều chunk/10–100 MiB; TLS1.3 và source/destination SHA-256 khớp.
+- [ ] Ubuntu -> Windows 10/11: đảo vai trò, kiểm tra lại TLS/pin/SHA và no-overwrite.
+- [ ] Windows -> Windows: dùng cặp Windows 10/11 nếu có, ghi cả hai chiều để bao phủ phiên bản.
+- [ ] Hai host khác mạng qua relay sau M6: byte tunnel không kết thúc TLS, truyền cả hai hướng; sai/đổi pin phải fail, không có app/file data trước xác minh.
+- [ ] Negative thực tế: reject, destination exists, mất mạng/chunk thiếu/hash mismatch không báo thành công; không tự ghi đè/retry/resume.
+- [ ] Lưu bằng chứng từng ca: commit/JDK/OS, hướng truyền/network direct hoặc relay, protocol/cipher, fingerprint public, size/hash nguồn/đích và PASS/FAIL; không log keys/password/file content.
+
+Trạng thái hiện tại: chỉ có Windows localhost CLI demo, localhost integration và CI M3. Không đánh dấu checklist hai máy từ CI Ubuntu/Windows; windows-latest cũng không xác nhận Windows 10/11 người dùng. Relay M6 còn chưa triển khai nhưng không được cắt khỏi MVP. macOS ngoài phạm vi bắt buộc, các ghi nhận CI 3 OS trước đây chỉ là lịch sử.
+
+Đã chạy thực trên Windows 11/JDK 21, Gradle/cache portable như mục M1:
+
+```powershell
+.\gradlew.bat --offline --no-daemon --console=plain :spotlessApply
+.\gradlew.bat --offline --no-daemon --console=plain clean spotlessCheck build :cli:installDist :desktop:installDist
+.\cli\build\install\cli\bin\cli.bat help
+.\desktop\build\install\desktop\bin\desktop.bat --smoke-test
+```
+
+PASS: clean build/Spotless, 54 task thực thi; XML 106 case = 105 PASS, 0 failure/error, 1 SKIP có chủ đích cho 1 GiB (bài này đã chạy riêng ở M3, không lặp lại vì không đổi source). Hai launcher Windows exit 0. Desktop tại branch Codex in placeholder; không tuyên bố đã kiểm thử GUI thật. Source/build dependency/toolchain không đổi, không có private key/secret/artifact trong phạm vi thay đổi. CI hai OS sau push được báo theo commit; các demo hai host/relay/GUI thật vẫn pending đúng checklist.
