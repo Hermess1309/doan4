@@ -161,14 +161,9 @@ public class MainFrame extends JFrame {
         devicesPanel.setOnDisconnectRequested(
                 () -> {
                     CoreApiAdapter currentAdapter = this.adapter;
-                    if (backendState == BackendState.READY
-                            && currentAdapter != null
-                            && currentSession != null
-                            && (!currentSession.sessionId().isBlank()
-                                    || currentSession.state() == SessionState.RELAY_CONNECTING
-                                    || currentSession.state() == SessionState.WAITING_FOR_PEER
-                                    || currentSession.state() == SessionState.TCP_CONNECTED)) {
-                        currentAdapter.disconnect(currentSession.sessionId());
+                    if (backendState == BackendState.READY && currentAdapter != null) {
+                        String sId = (currentSession != null) ? currentSession.sessionId() : "";
+                        currentAdapter.disconnect(sId);
                     }
                 });
 
