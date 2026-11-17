@@ -38,6 +38,7 @@ public class SecurityPanel extends JPanel {
     private final JButton btnPreviewDialog;
 
     private SessionViewModel currentSession = SessionViewModel.createDisconnected();
+    private boolean backendReady = true;
     private BiConsumer<String, String> onTlsHandshakeRequested;
 
     public SecurityPanel() {
@@ -154,10 +155,51 @@ public class SecurityPanel extends JPanel {
         });
     }
 
+    public void setBackendInitializing(String message) {
+        this.backendReady = false;
+        txtLocalFingerprint.setText("(Đang khởi tạo danh tính cục bộ...)");
+        lblSessionInfo.setText(message);
+        lblVerificationBadge.setText("[⟳] " + message.toUpperCase());
+        lblVerificationBadge.setForeground(new Color(53, 116, 240));
+        btnOpenVerificationDialog.setEnabled(false);
+        btnPreviewDialog.setEnabled(false);
+    }
+
+    public void setBackendFailed(String errorMessage) {
+        this.backendReady = false;
+        txtLocalFingerprint.setText("(Không khả dụng — Khởi tạo danh tính cục bộ thất bại)");
+        lblSessionInfo.setText("Lỗi khởi tạo backend bảo mật");
+        lblVerificationBadge.setText("[✕] LỖI KHỞI TẠO BẢO MẬT: " + errorMessage);
+        lblVerificationBadge.setForeground(new Color(229, 87, 83));
+        btnOpenVerificationDialog.setEnabled(false);
+        btnPreviewDialog.setEnabled(false);
+    }
+
+    public void setBackendReady(String localFingerprintRaw) {
+        this.backendReady = true;
+        setLocalFingerprint(localFingerprintRaw);
+        btnPreviewDialog.setEnabled(true);
+        updateSession(currentSession);
+    }
+
     public void updateSession(SessionViewModel session) {
         this.currentSession = (session != null) ? session : SessionViewModel.createDisconnected();
+        if (!backendReady) {
+            btnOpenVerificationDialog.setEnabled(false);
+            return;
+        }
         String sId = currentSession.sessionId();
         String addr = currentSession.remoteAddress();
+
+        if (currentSession.state() == SessionState.ERROR) {
+            lblSessionInfo.setText(sId.isBlank() ? (addr.isBlank() ? "Chưa có phiên kết nối" : addr) : (addr + " (Session #" + sId + ")"));
+            String err = (currentSession.errorMessage() != null && !currentSession.errorMessage().isBlank())
+                    ? currentSession.errorMessage() : "Xác thực thất bại / Lỗi kết nối";
+            lblVerificationBadge.setText("[✕] " + err.toUpperCase());
+            lblVerificationBadge.setForeground(new Color(229, 87, 83));
+            btnOpenVerificationDialog.setEnabled(false);
+            return;
+        }
 
         if (sId.isBlank() || currentSession.state() == SessionState.DISCONNECTED) {
             lblSessionInfo.setText("Chưa có phiên kết nối");
@@ -188,13 +230,6 @@ public class SecurityPanel extends JPanel {
             case SECURE_READY -> {
                 lblVerificationBadge.setText("[✓] KẾT NỐI AN TOÀN ĐÃ XÁC THỰC (TLS 1.3 MUTUAL)");
                 lblVerificationBadge.setForeground(new Color(73, 156, 84));
-                btnOpenVerificationDialog.setEnabled(false);
-            }
-            case ERROR -> {
-                String err = (currentSession.errorMessage() != null && !currentSession.errorMessage().isBlank())
-                        ? currentSession.errorMessage() : "Xác thực thất bại / Lỗi kết nối";
-                lblVerificationBadge.setText("[✕] " + err.toUpperCase());
-                lblVerificationBadge.setForeground(new Color(229, 87, 83));
                 btnOpenVerificationDialog.setEnabled(false);
             }
             case CLOSED -> {
@@ -236,6 +271,10 @@ public class SecurityPanel extends JPanel {
 
     public JLabel getLblVerificationBadge() {
         return lblVerificationBadge;
+    }
+
+    public JTextArea getTxtLocalFingerprint() {
+        return txtLocalFingerprint;
     }
 
     public void setOnTlsHandshakeRequested(BiConsumer<String, String> onTlsHandshakeRequested) {

@@ -11,6 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
@@ -52,7 +53,10 @@ class RealCoreApiAdapterTest {
 
     @BeforeAll
     static void generateIdentities() throws Exception {
-        testPassword = "superSecureTestPassword123!".toCharArray();
+        byte[] randomBytes = new byte[16];
+        new SecureRandom().nextBytes(randomBytes);
+        testPassword = HexFormat.of().formatHex(randomBytes).toCharArray();
+        Arrays.fill(randomBytes, (byte) 0);
         Path aliceStore = identitiesDir.resolve("alice.p12");
         Path bobStore = identitiesDir.resolve("bob.p12");
 
@@ -266,6 +270,21 @@ class RealCoreApiAdapterTest {
 
         assertThrows(ExecutionException.class, () -> aliceHandshake.get(10, TimeUnit.SECONDS));
         assertThrows(ExecutionException.class, () -> bobHandshake.get(10, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void testShutdownReleasesListenerAndExecutor() {
+        int bobPort = adapterBob.getListenPort();
+        assertTrue(bobPort > 0);
+        assertFalse(adapterBob.isShutdown());
+
+        adapterBob.shutdown();
+        assertTrue(adapterBob.isShutdown(), "shutdown() phải đóng listener và tắt worker executor");
+
+        // Kết nối mới vào cổng đã đóng phải thất bại
+        assertThrows(
+                ExecutionException.class,
+                () -> adapterAlice.connectDirect("127.0.0.1", bobPort).get(5, TimeUnit.SECONDS));
     }
 
     private static String calculateSha256(Path file) throws Exception {

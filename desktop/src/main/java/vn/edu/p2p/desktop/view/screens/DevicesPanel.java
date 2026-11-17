@@ -40,6 +40,7 @@ public class DevicesPanel extends JPanel {
     private final JLabel lblInputError;
 
     private SessionViewModel currentSession = SessionViewModel.createDisconnected();
+    private boolean networkEnabled = true;
     private java.util.function.BiConsumer<String, Integer> onConnectLanRequested;
     private Runnable onDisconnectRequested;
 
@@ -121,6 +122,9 @@ public class DevicesPanel extends JPanel {
 
         // Toggle radio
         rbLan.addActionListener(e -> {
+            if (!networkEnabled) {
+                return;
+            }
             txtHostIp.setEnabled(true);
             txtPort.setEnabled(true);
             btnConnectLan.setEnabled(true);
@@ -129,6 +133,9 @@ public class DevicesPanel extends JPanel {
             lblInputError.setText("");
         });
         rbRelay.addActionListener(e -> {
+            if (!networkEnabled) {
+                return;
+            }
             txtHostIp.setEnabled(false);
             txtPort.setEnabled(false);
             btnConnectLan.setEnabled(false);
@@ -190,7 +197,44 @@ public class DevicesPanel extends JPanel {
         this.onDisconnectRequested = onDisconnectRequested;
     }
 
+    public void setNetworkEnabled(boolean enabled, String statusMessage, boolean isError) {
+        this.networkEnabled = enabled;
+        rbLan.setEnabled(enabled);
+        rbRelay.setEnabled(enabled);
+        if (enabled) {
+            boolean lanSelected = rbLan.isSelected();
+            txtHostIp.setEnabled(lanSelected);
+            txtPort.setEnabled(lanSelected);
+            btnConnectLan.setEnabled(lanSelected);
+            txtPairingCode.setEnabled(!lanSelected);
+            btnConnectRelay.setEnabled(!lanSelected);
+            lblInputError.setText("");
+            updateSession(currentSession);
+        } else {
+            txtHostIp.setEnabled(false);
+            txtPort.setEnabled(false);
+            btnConnectLan.setEnabled(false);
+            txtPairingCode.setEnabled(false);
+            btnConnectRelay.setEnabled(false);
+            btnDisconnect.setEnabled(false);
+            if (isError) {
+                lblConnectionStatus.setText("LỖI KHỞI TẠO BACKEND — ĐÃ KHÓA KẾT NỐI");
+                lblConnectionStatus.setForeground(new Color(229, 87, 83));
+                lblPeerDetails.setText("Chức năng mạng bị khóa do khởi tạo backend thất bại.");
+                lblInputError.setText("Lỗi: " + statusMessage);
+            } else {
+                lblConnectionStatus.setText("ĐANG KHỞI TẠO ỨNG DỤNG...");
+                lblConnectionStatus.setForeground(new Color(53, 116, 240));
+                lblPeerDetails.setText(statusMessage);
+                lblInputError.setText("");
+            }
+        }
+    }
+
     private void validateAndHandleLanConnect() {
+        if (!networkEnabled) {
+            return;
+        }
         String host = txtHostIp.getText().trim();
         String portStr = txtPort.getText().trim();
 
@@ -219,6 +263,9 @@ public class DevicesPanel extends JPanel {
     }
 
     private void validateAndHandleRelayConnect() {
+        if (!networkEnabled) {
+            return;
+        }
         String code = txtPairingCode.getText().trim();
         if (!ValidationUtils.isValidPairingCode(code)) {
             lblInputError.setText("Lỗi: Mã ghép nối Relay không hợp lệ! (Định dạng: 6-12 ký tự chữ/số, ví dụ: 782-901)");
@@ -232,11 +279,29 @@ public class DevicesPanel extends JPanel {
 
     public void updateSession(SessionViewModel session) {
         this.currentSession = (session != null) ? session : SessionViewModel.createDisconnected();
+        if (!networkEnabled) {
+            return;
+        }
+        if (currentSession.state() == SessionState.ERROR) {
+            lblConnectionStatus.setText("LỖI KẾT NỐI / BẢO MẬT");
+            lblConnectionStatus.setForeground(new Color(229, 87, 83));
+            String errMsg = (currentSession.errorMessage() != null && !currentSession.errorMessage().isBlank())
+                    ? currentSession.errorMessage() : "Kết nối hoặc xác thực TLS thất bại.";
+            lblPeerDetails.setText(currentSession.remoteAddress().isBlank()
+                    ? "Không thể thiết lập kết nối."
+                    : "Đối tác: " + currentSession.remoteAddress());
+            lblInputError.setText("Lỗi: " + errMsg);
+            btnDisconnect.setEnabled(false);
+            return;
+        }
+
+        lblConnectionStatus.setForeground(null);
         lblConnectionStatus.setText(currentSession.state().getDisplayName().toUpperCase());
         if (currentSession.sessionId().isBlank() || currentSession.state() == SessionState.DISCONNECTED) {
             lblPeerDetails.setText("Chưa có đối tác kết nối.");
             btnDisconnect.setEnabled(false);
         } else {
+            lblInputError.setText("");
             lblPeerDetails.setText("Đối tác: " + currentSession.remoteAddress() + " | Session #" + currentSession.sessionId());
             btnDisconnect.setEnabled(true);
         }

@@ -25,7 +25,7 @@ public class StatusBarPanel extends JPanel {
                 BorderFactory.createMatteBorder(1, 0, 0, 0, new Color(60, 63, 65)),
                 BorderFactory.createEmptyBorder(4, 12, 4, 12)));
 
-        lblEngineStatus = new JLabel("Trạng thái: Sẵn sàng (M0 Scaffold)");
+        lblEngineStatus = new JLabel("Trạng thái: Sẵn sàng");
         lblEngineStatus.setFont(lblEngineStatus.getFont().deriveFont(Font.PLAIN, 11f));
         add(lblEngineStatus, BorderLayout.WEST);
 
@@ -33,7 +33,7 @@ public class StatusBarPanel extends JPanel {
         lblNetworkSpeed = new JLabel("↑ 0.0 KB/s   ↓ 0.0 KB/s");
         lblNetworkSpeed.setFont(lblNetworkSpeed.getFont().deriveFont(Font.PLAIN, 11f));
 
-        lblLocalInfo = new JLabel("LAN Port: 52001");
+        lblLocalInfo = new JLabel("LAN Port: --");
         lblLocalInfo.setFont(lblLocalInfo.getFont().deriveFont(Font.PLAIN, 11f));
 
         rightGroup.add(lblNetworkSpeed);
@@ -52,5 +52,13 @@ public class StatusBarPanel extends JPanel {
 
     public void setLocalInfo(String info) {
         lblLocalInfo.setText(info);
+    }
+
+    public String getEngineStatusText() {
+        return lblEngineStatus.getText();
+    }
+
+    public String getLocalInfoText() {
+        return lblLocalInfo.getText();
     }
 }

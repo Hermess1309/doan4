@@ -145,24 +145,33 @@ public interface CoreApiAdapter {
 
 ## 8. Kiến trúc Tích hợp Kỹ thuật (Technical Integration Architecture)
 
-### 8.1. Adapter Layer & Virtual Threading
+### 8.1. Adapter Layer, Non-Blocking Startup & Fail-Safe Policy
 - **`CoreApiAdapter`**: Interface chuẩn hóa giữa tầng UI Swing và Core Backend.
-- **`DummyCoreApiAdapter`**: Mock adapter tĩnh dùng cho UI preview, GUI layout tests và CI headless tests mà không cần mở socket hay đĩa thật.
+- **`DummyCoreApiAdapter`**: Chỉ được sử dụng trong unit test, preview UI và chế độ `--smoke-test` được chỉ định rõ. **Tuyệt đối không tự fallback sang `DummyCoreApiAdapter` trong chế độ production**.
+- **Khởi động không chặn EDT (`DesktopApplication.startProductionOnEdt`)**:
+  - `MainFrame.createProductionWindow()` dựng cửa sổ ngay lập tức trên EDT với trạng thái `"Đang khởi tạo ứng dụng..."` và khóa toàn bộ nút kết nối/gửi tệp/bắt tay TLS.
+  - Quá trình nạp/tạo keystore (`keytool`) và mở cổng lắng nghe (`PeerNode.listen`) chạy hoàn toàn trên background worker (`p2p-desktop-startup`), đảm bảo GUI không bị đơ ở lần chạy đầu.
+  - Khi thành công, backend thật được gắn trên EDT (`attachBackendAdapter`), hiển thị fingerprint thật, cổng LAN thật và mở khóa kết nối.
+  - Khi thất bại, ứng dụng chuyển sang trạng thái lỗi (`FAILED`), báo lỗi rõ ràng, giữ nguyên khóa toàn bộ chức năng mạng, không hiển thị fingerprint giả và không giả lập `SECURE_READY`.
+  - Đóng cửa sổ (`windowClosing` / `dispose`) tự động hủy worker khởi tạo và gọi `adapter.shutdown()`.
 - **`RealCoreApiAdapter`**:
   - Quản lý vòng đời `PeerNode`, `PeerListener` và `TransferSession`.
-  - Khởi tạo listener loop trên Virtual Thread (`Thread.ofVirtual().name("real-core-listener").start(...)`).
   - Mọi tác vụ I/O, handshake, truyền tải chạy trên `Executors.newVirtualThreadPerTaskExecutor()`.
   - Toàn bộ cập nhật giao diện (Session updates, Transfer updates, Incoming offer popups) được marshalling an toàn về Event Dispatch Thread (EDT) bằng `SwingUtilities.invokeLater`.
 
 ### 8.2. Quản lý Danh tính Cục bộ & Mật khẩu An toàn (`LocalIdentityHelper`)
-- Vị trí lưu trữ mặc định: `%LOCALAPPDATA%/P2pFileTransfer/` (Windows) hoặc `~/.local/share/p2p-file-transfer/` (Linux).
-- Có thể phân biệt tên instance qua cờ `--name=alice` hoặc `--name=bob`.
-- **Chính sách mật khẩu an toàn**:
-  - Không sử dụng mật khẩu mặc định yếu (không dùng "changeit", "password123").
-  - Tự động sinh mật khẩu ngẫu nhiên 128-bit entropy (32 ký tự hex) bằng `SecureRandom`.
-  - Mật khẩu lưu trong tệp `.pass` cùng thư mục với quyền đọc nghiêm ngặt (POSIX `0600` / `rw-------` trên Linux, User ACL trên Windows).
-  - Không truyền mật khẩu qua tham số dòng lệnh để tránh rò rỉ trong danh sách tiến trình (`ps`, Task Manager). Keytool nhận mật khẩu qua biến môi trường `-storepass:env`.
-  - Luôn xóa mảng `char[]` mật khẩu trong khối `finally`.
+- Vị trí lưu trữ mặc định (luôn nằm ngoài repository): `%LOCALAPPDATA%/P2pFileTransfer/` (Windows) hoặc `~/.local/share/p2p-file-transfer/` (Linux).
+- Có thể phân biệt tên instance hợp lệ (`[a-zA-Z0-9._-]`, chống path traversal) qua cờ `--name=alice` hoặc `--name=bob`.
+- **Chính sách bảo vệ tệp nhạy cảm (Fail-Closed)**:
+  - Không hardcode mật khẩu; không ghi mật khẩu ra log hoặc Preferences; không nhận mật khẩu qua tham số dòng lệnh (`argv`).
+  - Hỗ trợ cung cấp mật khẩu qua biến môi trường (`P2P_PASSWORD_ENV` hoặc `P2P_IDENTITY_PASSWORD`). Nếu không đặt biến môi trường, hệ thống tự sinh mật khẩu ngẫu nhiên 128-bit entropy (32 ký tự hex) bằng `SecureRandom`.
+  - Chống symbolic-link attack và chống ghi đè tệp nhạy cảm bằng `LinkOption.NOFOLLOW_LINKS` và tạo tệp nguyên tử `CREATE_NEW`.
+  - **Linux**: Bắt buộc quyền `0600` (`rw-------`) cho tệp `.pass` và `.p12`, quyền `0700` cho thư mục mới tạo.
+  - **Windows**: Bắt buộc áp dụng `AclFileAttributeView` giới hạn quyền truy cập chỉ cho tài khoản người dùng hiện tại trước khi ghi byte mật khẩu và sau khi `keytool` sinh `.p12`.
+  - Nếu không thể áp dụng hoặc xác nhận quyền truy cập an toàn, hệ thống xóa tệp tạo dở và ném `IOException` (fail-closed) thay vì tiếp tục không an toàn.
+  - `keytool` nhận mật khẩu qua biến môi trường cục bộ `-storepass:env P2P_KEYTOOL_PASS`; toàn bộ mảng `char[]`/`byte[]` mật khẩu được xóa trong `finally`.
+- **Giới hạn bảo mật MVP**:
+  - Lưu mật khẩu trong tệp `.pass` cục bộ kèm quyền OS (`0600` / Windows ACL) chỉ ngăn chặn tài khoản OS khác trên cùng máy đọc tệp, **không tương đương với mã hóa secret bằng OS Credential Manager** (Windows DPAPI/Credential Manager, Linux Secret Service/libsecret). Trong môi trường yêu cầu cao hơn, người dùng nên truyền mật khẩu thông qua biến môi trường được quản lý bởi vault/OS credential manager.
 
 ### 8.3. Phương thức Khởi chạy Ứng dụng Thực tế (Đã xác minh)
 Module `desktop` là ứng dụng đa module phụ thuộc vào `:core`, `:crypto`, `:protocol` và FlatLaf. Tệp `desktop.jar` thông thường không chứa fat-jar bundle, do đó **không sử dụng `java -jar desktop.jar`**. Sử dụng một trong hai phương thức chuẩn hóa sau:

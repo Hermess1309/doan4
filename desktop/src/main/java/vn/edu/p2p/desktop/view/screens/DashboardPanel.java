@@ -43,6 +43,7 @@ public class DashboardPanel extends JPanel {
 
     private File currentSelectedFile;
     private SessionViewModel currentSession = SessionViewModel.createDisconnected();
+    private boolean backendReady = true;
     private java.util.function.Consumer<File> onSendRequested;
 
     public DashboardPanel() {
@@ -169,6 +170,30 @@ public class DashboardPanel extends JPanel {
         }
     }
 
+    public void setBackendInitializing(String statusText) {
+        this.backendReady = false;
+        lblLocalDev.setText("PC-Desktop (Đang khởi tạo danh tính & mạng...)");
+        lblPeerStatus.setText(statusText);
+        lblSecurityStatus.setText("⟳ " + statusText);
+        lblSecurityStatus.setForeground(new Color(53, 116, 240));
+        updateSendButtonState();
+    }
+
+    public void setBackendFailed(String errorText) {
+        this.backendReady = false;
+        lblLocalDev.setText("PC-Desktop (Lỗi khởi tạo backend — Đã khóa mạng)");
+        lblPeerStatus.setText("Không thể kết nối mạng vì backend chưa khởi tạo được");
+        lblSecurityStatus.setText("✕ Không khả dụng: " + errorText);
+        lblSecurityStatus.setForeground(new Color(229, 87, 83));
+        updateSendButtonState();
+    }
+
+    public void setBackendReady(int listenPort) {
+        this.backendReady = true;
+        setListeningPort(listenPort);
+        updateSessionState(currentSession);
+    }
+
     private void chooseLocalFile() {
         JFileChooser fileChooser = new JFileChooser();
         fileChooser.setDialogTitle("Chọn tệp tin cần gửi qua P2P");
@@ -198,7 +223,18 @@ public class DashboardPanel extends JPanel {
 
     public void updateSessionState(SessionViewModel session) {
         this.currentSession = (session != null) ? session : SessionViewModel.createDisconnected();
-        if (currentSession.sessionId().isBlank() || currentSession.state() == SessionState.DISCONNECTED) {
+        if (!backendReady) {
+            updateSendButtonState();
+            return;
+        }
+        if (currentSession.state() == SessionState.ERROR) {
+            String peer = currentSession.remoteAddress().isBlank() ? "Chưa kết nối" : currentSession.remoteAddress();
+            lblPeerStatus.setText(peer);
+            String err = (currentSession.errorMessage() != null && !currentSession.errorMessage().isBlank())
+                    ? currentSession.errorMessage() : "Lỗi xác thực / Handshake thất bại";
+            lblSecurityStatus.setText("✕ " + err);
+            lblSecurityStatus.setForeground(new Color(229, 87, 83));
+        } else if (currentSession.sessionId().isBlank() || currentSession.state() == SessionState.DISCONNECTED) {
             lblPeerStatus.setText("Chưa kết nối (Vào mục 'Thiết bị & Mạng' để kết nối)");
             lblSecurityStatus.setText("Chưa kết nối");
             lblSecurityStatus.setForeground(new Color(157, 160, 168));
@@ -220,12 +256,6 @@ public class DashboardPanel extends JPanel {
                 case SECURE_READY -> {
                     lblSecurityStatus.setText("✓ ĐÃ XÁC THỰC MUTUAL TLS 1.3 (An toàn)");
                     lblSecurityStatus.setForeground(new Color(73, 156, 84));
-                }
-                case ERROR -> {
-                    String err = (currentSession.errorMessage() != null && !currentSession.errorMessage().isBlank())
-                            ? currentSession.errorMessage() : "Lỗi xác thực / Handshake thất bại";
-                    lblSecurityStatus.setText("✕ " + err);
-                    lblSecurityStatus.setForeground(new Color(229, 87, 83));
                 }
                 default -> {
                     lblSecurityStatus.setText(currentSession.state().getDisplayName());
@@ -250,7 +280,8 @@ public class DashboardPanel extends JPanel {
     }
 
     private void updateSendButtonState() {
-        boolean canSend = currentSession.isReadyToTransfer()
+        boolean canSend = backendReady
+                && currentSession.isReadyToTransfer()
                 && currentSelectedFile != null
                 && ValidationUtils.isValidReadableFile(currentSelectedFile);
         btnSend.setEnabled(canSend);

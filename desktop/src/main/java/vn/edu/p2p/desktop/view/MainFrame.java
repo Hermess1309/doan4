@@ -5,6 +5,8 @@ import java.awt.CardLayout;
 import java.awt.Color;
 import java.awt.Dimension;
 import java.io.File;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import javax.swing.JFrame;
 import javax.swing.JOptionPane;
@@ -32,7 +34,13 @@ import vn.edu.p2p.desktop.view.screens.TransfersPanel;
  */
 public class MainFrame extends JFrame {
 
-    private final CoreApiAdapter adapter;
+    public enum BackendState {
+        INITIALIZING,
+        READY,
+        FAILED
+    }
+
+    private final boolean productionMode;
     private final CardLayout cardLayout;
     private final JPanel cardsPanel;
     private final SidebarPanel sidebarPanel;
@@ -45,15 +53,42 @@ public class MainFrame extends JFrame {
     private final SecurityPanel securityPanel;
     private final SettingsPanel settingsPanel;
 
+    private final AtomicBoolean resourcesClosed = new AtomicBoolean(false);
+    private volatile CoreApiAdapter adapter;
+    private volatile BackendState backendState;
+    private volatile String initializationError = "";
+    private volatile Runnable onShutdownHook;
     private SessionViewModel currentSession = SessionViewModel.createDisconnected();
 
+    /**
+     * Constructor mặc định chỉ dành riêng cho unit test, preview UI và chế độ --smoke-test.
+     * Chế độ ứng dụng thật bắt buộc dùng {@link #createProductionWindow()} hoặc
+     * {@link #MainFrame(CoreApiAdapter)} với adapter thật.
+     */
     public MainFrame() {
-        this(new DummyCoreApiAdapter());
+        this(new DummyCoreApiAdapter(), false);
     }
 
+    /**
+     * Khởi tạo cửa sổ gắn trực tiếp một {@link CoreApiAdapter} đã sẵn sàng.
+     * Tuyệt đối không tự fallback sang {@link DummyCoreApiAdapter} khi adapter null.
+     */
     public MainFrame(CoreApiAdapter adapter) {
+        this(Objects.requireNonNull(adapter, "adapter không được null"), false);
+    }
+
+    /**
+     * Khởi tạo cửa sổ chế độ production với backend được chuẩn bị bất đồng bộ ngoài EDT.
+     * Hiển thị trạng thái "Đang khởi tạo ứng dụng..." và khóa toàn bộ chức năng mạng
+     * cho đến khi backend thật sẵn sàng.
+     */
+    public static MainFrame createProductionWindow() {
+        return new MainFrame(null, true);
+    }
+
+    private MainFrame(CoreApiAdapter initialAdapter, boolean productionMode) {
         super("P2P File Transfer — Secure End-to-End (Java 21 & FlatLaf)");
-        this.adapter = (adapter != null) ? adapter : new DummyCoreApiAdapter();
+        this.productionMode = productionMode;
 
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setSize(980, 640);
@@ -72,56 +107,61 @@ public class MainFrame extends JFrame {
         securityPanel = new SecurityPanel();
         settingsPanel = new SettingsPanel();
 
-        // Cập nhật cấu hình ban đầu từ adapter
-        securityPanel.setLocalFingerprint(this.adapter.getLocalFingerprint());
-        dashboardPanel.setListeningPort(this.adapter.getListenPort());
+        // Gắn các hành động giao diện (luôn kiểm tra backend READY và adapter != null)
+        dashboardPanel.setOnSendRequested(
+                file -> {
+                    CoreApiAdapter currentAdapter = this.adapter;
+                    if (backendState == BackendState.READY
+                            && currentAdapter != null
+                            && currentSession != null
+                            && currentSession.isReadyToTransfer()) {
+                        currentAdapter.offerFile(currentSession.sessionId(), file);
+                        navigateToTab(SidebarPanel.TAB_TRANSFERS);
+                    }
+                });
 
-        // Lắng nghe sự kiện từ DashboardPanel
-        dashboardPanel.setOnSendRequested(file -> {
-            if (currentSession != null && currentSession.isReadyToTransfer()) {
-                this.adapter.offerFile(currentSession.sessionId(), file);
-                navigateToTab(SidebarPanel.TAB_TRANSFERS);
-            }
-        });
+        devicesPanel.setOnConnectLanRequested(
+                (host, port) -> {
+                    CoreApiAdapter currentAdapter = this.adapter;
+                    if (backendState == BackendState.READY && currentAdapter != null) {
+                        currentAdapter.connectDirect(host, port);
+                    }
+                });
+        devicesPanel.setOnDisconnectRequested(
+                () -> {
+                    CoreApiAdapter currentAdapter = this.adapter;
+                    if (backendState == BackendState.READY
+                            && currentAdapter != null
+                            && currentSession != null
+                            && !currentSession.sessionId().isBlank()) {
+                        currentAdapter.disconnect(currentSession.sessionId());
+                    }
+                });
 
-        // Lắng nghe sự kiện từ DevicesPanel
-        devicesPanel.setOnConnectLanRequested((host, port) -> {
-            this.adapter.connectDirect(host, port);
-        });
-        devicesPanel.setOnDisconnectRequested(() -> {
-            if (currentSession != null && !currentSession.sessionId().isBlank()) {
-                this.adapter.disconnect(currentSession.sessionId());
-            }
-        });
+        securityPanel.setOnTlsHandshakeRequested(
+                (sessionId, pin) -> {
+                    CoreApiAdapter currentAdapter = this.adapter;
+                    if (backendState == BackendState.READY && currentAdapter != null) {
+                        currentAdapter.startTlsHandshake(sessionId, pin);
+                    }
+                });
 
-        // Lắng nghe sự kiện từ SecurityPanel
-        securityPanel.setOnTlsHandshakeRequested((sessionId, pin) -> {
-            this.adapter.startTlsHandshake(sessionId, pin);
-        });
+        transfersPanel.setOnCancelRequested(
+                transferId -> {
+                    CoreApiAdapter currentAdapter = this.adapter;
+                    if (backendState == BackendState.READY && currentAdapter != null) {
+                        currentAdapter.cancelTransfer(transferId);
+                    }
+                });
 
-        // Lắng nghe sự kiện từ TransfersPanel
-        transfersPanel.setOnCancelRequested(transferId -> {
-            this.adapter.cancelTransfer(transferId);
-        });
-
-        // Đăng ký nhận cập nhật từ CoreApiAdapter
-        this.adapter.registerListeners(
-                sessionVm -> SwingUtilities.invokeLater(() -> updateSession(sessionVm)),
-                transferVm -> SwingUtilities.invokeLater(() -> updateTransfer(transferVm))
-        );
-
-        // Đăng ký bộ xử lý nhận đề nghị gửi tệp nếu là RealCoreApiAdapter
-        if (this.adapter instanceof RealCoreApiAdapter realAdapter) {
-            realAdapter.setIncomingOfferHandler(this::promptIncomingOfferDialog);
-        }
-
-        // Đóng adapter khi thoát ứng dụng
-        addWindowListener(new java.awt.event.WindowAdapter() {
-            @Override
-            public void windowClosing(java.awt.event.WindowEvent e) {
-                MainFrame.this.adapter.shutdown();
-            }
-        });
+        // Đóng toàn bộ tài nguyên backend và background worker khi người dùng đóng cửa sổ
+        addWindowListener(
+                new java.awt.event.WindowAdapter() {
+                    @Override
+                    public void windowClosing(java.awt.event.WindowEvent e) {
+                        shutdownResources();
+                    }
+                });
 
         // Vùng chứa CardLayout
         cardLayout = new CardLayout();
@@ -145,10 +185,124 @@ public class MainFrame extends JFrame {
 
         // Lắng nghe sự kiện chuyển tab từ Sidebar
         sidebarPanel.setOnNavigate(this::navigateToTab);
+
+        if (initialAdapter != null) {
+            attachBackendAdapter(initialAdapter);
+        } else {
+            enterInitializingState();
+        }
+    }
+
+    private void enterInitializingState() {
+        this.adapter = null;
+        this.backendState = BackendState.INITIALIZING;
+        this.initializationError = "";
+
+        String initText = "Đang khởi tạo ứng dụng...";
+        headerPanel.setConnectionBadge("[ ⟳ " + initText + " ]", new Color(53, 116, 240));
+        statusBarPanel.setEngineStatus(initText);
+        statusBarPanel.setLocalInfo("LAN Port: Đang khởi tạo...");
+        dashboardPanel.setBackendInitializing(initText);
+        devicesPanel.setNetworkEnabled(false, initText, false);
+        securityPanel.setBackendInitializing(initText);
+    }
+
+    /**
+     * Gắn backend thật sau khi tác vụ khởi tạo nền hoàn tất. Bắt buộc gọi trên Swing EDT.
+     */
+    public void attachBackendAdapter(CoreApiAdapter realAdapter) {
+        Objects.requireNonNull(realAdapter, "realAdapter không được null");
+        if (productionMode && realAdapter instanceof DummyCoreApiAdapter) {
+            throw new IllegalArgumentException(
+                    "Không được phép gắn DummyCoreApiAdapter vào cửa sổ chế độ production.");
+        }
+        if (resourcesClosed.get()) {
+            realAdapter.shutdown();
+            return;
+        }
+
+        this.adapter = realAdapter;
+        this.backendState = BackendState.READY;
+        this.initializationError = "";
+
+        int listenPort = realAdapter.getListenPort();
+        String localFingerprint = realAdapter.getLocalFingerprint();
+
+        securityPanel.setBackendReady(localFingerprint);
+        dashboardPanel.setBackendReady(listenPort);
+        statusBarPanel.setLocalInfo(
+                listenPort > 0 ? ("LAN Port: " + listenPort) : "LAN Port: Chưa mở");
+        devicesPanel.setNetworkEnabled(true, "", false);
+
+        realAdapter.registerListeners(
+                sessionVm -> SwingUtilities.invokeLater(() -> updateSession(sessionVm)),
+                transferVm -> SwingUtilities.invokeLater(() -> updateTransfer(transferVm)));
+
+        if (realAdapter instanceof RealCoreApiAdapter coreAdapter) {
+            coreAdapter.setIncomingOfferHandler(this::promptIncomingOfferDialog);
+        }
+
+        updateSession(currentSession);
+    }
+
+    /**
+     * Đánh dấu khởi tạo backend thất bại trong chế độ production:
+     * tuyệt đối không fallback sang Dummy, khóa toàn bộ chức năng mạng và hiển thị lỗi rõ ràng.
+     */
+    public void markBackendInitializationFailed(Throwable error) {
+        this.adapter = null;
+        this.backendState = BackendState.FAILED;
+        String detail =
+                (error != null && error.getMessage() != null && !error.getMessage().isBlank())
+                        ? error.getMessage()
+                        : "Không thể khởi tạo danh tính hoặc dịch vụ mạng P2P.";
+        this.initializationError = detail;
+
+        headerPanel.setConnectionBadge("[ ✕ Lỗi khởi tạo hệ thống ]", new Color(229, 87, 83));
+        statusBarPanel.setEngineStatus("Lỗi khởi tạo: " + detail);
+        statusBarPanel.setLocalInfo("LAN Port: Không khả dụng");
+        dashboardPanel.setBackendFailed(detail);
+        devicesPanel.setNetworkEnabled(false, detail, true);
+        securityPanel.setBackendFailed(detail);
+        transfersPanel.resetToIdle();
+    }
+
+    public void setOnShutdownHook(Runnable onShutdownHook) {
+        this.onShutdownHook = onShutdownHook;
+    }
+
+    public void shutdownResources() {
+        if (!resourcesClosed.compareAndSet(false, true)) {
+            return;
+        }
+        Runnable hook = this.onShutdownHook;
+        if (hook != null) {
+            try {
+                hook.run();
+            } catch (Exception ignored) {
+                // Không để lỗi shutdown làm treo tiến trình đóng cửa sổ
+            }
+        }
+        CoreApiAdapter currentAdapter = this.adapter;
+        if (currentAdapter != null) {
+            try {
+                currentAdapter.shutdown();
+            } catch (Exception ignored) {
+                // Giải phóng best-effort khi đóng
+            }
+        }
+    }
+
+    @Override
+    public void dispose() {
+        shutdownResources();
+        super.dispose();
     }
 
     private void promptIncomingOfferDialog(FileOffer offer, Consumer<File> decisionCallback) {
-        String message = String.format("""
+        String message =
+                String.format(
+                        """
                 Thiết bị đối tác gửi yêu cầu truyền tệp tin:
                 - Tên tệp: %s
                 - Dung lượng: %s
@@ -156,22 +310,24 @@ public class MainFrame extends JFrame {
 
                 Bạn có muốn tiếp nhận tệp tin này không?
                 """,
-                offer.fileName(),
-                Formatters.formatBytes(offer.size()),
-                offer.sha256());
+                        offer.fileName(), Formatters.formatBytes(offer.size()), offer.sha256());
 
-        int choice = JOptionPane.showConfirmDialog(
-                this,
-                message,
-                "Yêu cầu truyền tệp tin đến",
-                JOptionPane.YES_NO_OPTION,
-                JOptionPane.QUESTION_MESSAGE
-        );
+        int choice =
+                JOptionPane.showConfirmDialog(
+                        this,
+                        message,
+                        "Yêu cầu truyền tệp tin đến",
+                        JOptionPane.YES_NO_OPTION,
+                        JOptionPane.QUESTION_MESSAGE);
 
         if (choice == JOptionPane.YES_OPTION) {
-            javax.swing.JFileChooser chooser = new javax.swing.JFileChooser(AppSettings.getDownloadDirectory());
+            javax.swing.JFileChooser chooser =
+                    new javax.swing.JFileChooser(AppSettings.getDownloadDirectory());
             chooser.setDialogTitle("Chọn vị trí lưu tệp tin (Không được ghi đè)");
-            chooser.setSelectedFile(new File(AppSettings.getDownloadDirectory(), ValidationUtils.sanitizeFileName(offer.fileName())));
+            chooser.setSelectedFile(
+                    new File(
+                            AppSettings.getDownloadDirectory(),
+                            ValidationUtils.sanitizeFileName(offer.fileName())));
 
             int saveChoice = chooser.showSaveDialog(this);
             if (saveChoice == javax.swing.JFileChooser.APPROVE_OPTION) {
@@ -181,8 +337,7 @@ public class MainFrame extends JFrame {
                             this,
                             "Tệp tin đã tồn tại trên đĩa! Theo chính sách bảo mật M3, không được ghi đè.",
                             "Cảnh báo trùng lặp tệp",
-                            JOptionPane.WARNING_MESSAGE
-                    );
+                            JOptionPane.WARNING_MESSAGE);
                     decisionCallback.accept(null);
                     return;
                 }
@@ -214,19 +369,35 @@ public class MainFrame extends JFrame {
      */
     public void updateSession(SessionViewModel session) {
         this.currentSession = (session != null) ? session : SessionViewModel.createDisconnected();
+        if (backendState != BackendState.READY) {
+            return;
+        }
         dashboardPanel.updateSessionState(currentSession);
         devicesPanel.updateSession(currentSession);
         securityPanel.updateSession(currentSession);
 
-        if (session == null || session.sessionId().isBlank() || session.state() == SessionState.DISCONNECTED) {
+        if (currentSession.state() == SessionState.ERROR) {
+            headerPanel.setConnectionBadge("[ ✕ Lỗi kết nối / TLS ]", new Color(229, 87, 83));
+            String err =
+                    (currentSession.errorMessage() != null && !currentSession.errorMessage().isBlank())
+                            ? currentSession.errorMessage()
+                            : "Lỗi kết nối / xác thực TLS";
+            statusBarPanel.setEngineStatus("Lỗi: " + err);
+            return;
+        }
+
+        if (currentSession.sessionId().isBlank()
+                || currentSession.state() == SessionState.DISCONNECTED) {
             headerPanel.setConnectionBadge("[ Chưa kết nối ]", new Color(157, 160, 168));
             statusBarPanel.setEngineStatus("Sẵn sàng (Chưa kết nối)");
             return;
         }
 
-        switch (session.state()) {
+        switch (currentSession.state()) {
             case TCP_CONNECTED -> {
-                headerPanel.setConnectionBadge("[ TCP: " + session.remoteAddress() + " (Chưa TLS) ]", new Color(229, 168, 59));
+                headerPanel.setConnectionBadge(
+                        "[ TCP: " + currentSession.remoteAddress() + " (Chưa TLS) ]",
+                        new Color(229, 168, 59));
                 statusBarPanel.setEngineStatus("Đã nối TCP — Chờ nhập vân tay trước khi bắt tay TLS");
             }
             case WAITING_FOR_FINGERPRINT -> {
@@ -238,16 +409,15 @@ public class MainFrame extends JFrame {
                 statusBarPanel.setEngineStatus("Đang tiến hành bắt tay Mutual TLS 1.3...");
             }
             case SECURE_READY -> {
-                headerPanel.setConnectionBadge("[ ✓ Bảo mật TLS 1.3: " + session.remoteAddress() + " ]", new Color(73, 156, 84));
+                headerPanel.setConnectionBadge(
+                        "[ ✓ Bảo mật TLS 1.3: " + currentSession.remoteAddress() + " ]",
+                        new Color(73, 156, 84));
                 statusBarPanel.setEngineStatus("Kết nối an toàn đã xác thực (Mutual TLS 1.3)");
             }
-            case ERROR -> {
-                headerPanel.setConnectionBadge("[ ✕ Lỗi kết nối / TLS ]", new Color(229, 87, 83));
-                statusBarPanel.setEngineStatus("Lỗi: " + session.errorMessage());
-            }
             default -> {
-                headerPanel.setConnectionBadge("[ " + session.state().getDisplayName() + " ]", new Color(157, 160, 168));
-                statusBarPanel.setEngineStatus(session.state().getDisplayName());
+                headerPanel.setConnectionBadge(
+                        "[ " + currentSession.state().getDisplayName() + " ]", new Color(157, 160, 168));
+                statusBarPanel.setEngineStatus(currentSession.state().getDisplayName());
             }
         }
     }
@@ -256,11 +426,30 @@ public class MainFrame extends JFrame {
      * Cập nhật tiến trình truyền tải file trên Dashboard và TransfersPanel.
      */
     public void updateTransfer(TransferViewModel transfer) {
+        if (backendState != BackendState.READY) {
+            return;
+        }
         dashboardPanel.updateTransferProgress(transfer);
         transfersPanel.updateTransferProgress(transfer);
         if (transfer != null) {
             statusBarPanel.setNetworkSpeed("Tốc độ: " + transfer.getFormattedSpeed());
         }
+    }
+
+    public BackendState getBackendState() {
+        return backendState;
+    }
+
+    public CoreApiAdapter getAttachedAdapter() {
+        return adapter;
+    }
+
+    public String getInitializationError() {
+        return initializationError;
+    }
+
+    public boolean isResourcesClosed() {
+        return resourcesClosed.get();
     }
 
     public DashboardPanel getDashboardPanel() {

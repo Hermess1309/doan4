@@ -13,6 +13,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
@@ -299,7 +300,10 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                     }
                 });
             } catch (IOException e) {
-                // Phiên bị đóng hoặc ngắt kết nối
+                if (running.get() && activeSession == session) {
+                    closeActiveSessionInternal();
+                    dispatchSessionUpdate(SessionViewModel.createDisconnected());
+                }
             }
         });
     }
@@ -506,15 +510,16 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
     @Override
     public CompletableFuture<Void> cancelTransfer(String transferId) {
         return CompletableFuture.runAsync(() -> {
+            TransferViewModel previous = currentTransferVm;
             closeActiveSessionInternal();
             TransferViewModel cancelledVm = new TransferViewModel(
                     transferId,
-                    "",
-                    0L,
-                    0L,
+                    (previous != null) ? previous.fileName() : "",
+                    (previous != null) ? previous.totalBytes() : 0L,
+                    (previous != null) ? previous.bytesTransferred() : 0L,
                     0.0,
-                    TransferDirection.DOWNLOAD,
-                    TransferState.FAILED,
+                    (previous != null) ? previous.direction() : TransferDirection.DOWNLOAD,
+                    TransferState.CANCELLED,
                     "Tác vụ truyền tải đã bị hủy bởi người dùng."
             );
             dispatchTransferUpdate(cancelledVm);
@@ -558,6 +563,15 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
             } catch (IOException ignored) {}
         }
         workerPool.shutdownNow();
+        try {
+            workerPool.awaitTermination(2, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    public boolean isShutdown() {
+        return !running.get() && workerPool.isShutdown();
     }
 
     private synchronized void closeActiveSessionInternal() {
