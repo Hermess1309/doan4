@@ -186,3 +186,25 @@ Test WireTap chỉ trong test, capture bounded 2 MiB ở TCP relay link: marker 
 Ba JVM thật chạy relay + receiver + sender với identity tạm riêng; hai ca 61 B/1 MiB exit 0 và success hai bên. Ca wrong-pin subprocess exit 2 hai phía, không offer/no destination. Unit/integration còn kiểm tra mã sai/hết hạn/đã dùng, rate/session/socket limits, malformed/partial/truncated metadata, shared idle/lifetime/backpressure, pending gate và ngắt mạng/cleanup. Password/cert sinh trong @TempDir, không phụ thuộc máy cá nhân, không secrets trong output.
 
 Chưa kiểm thử public Internet/NAT, Windows 10 thực, Ubuntu thực hoặc truyền giữa hai host; CI sau push được báo riêng theo SHA. Chưa đo peak RAM/benchmark, chưa thử 1 GiB qua relay, chưa tích hợp UI hoặc resume. Pending host ngắt có thể giữ tài nguyên tới TTL 120 s; idle 60 s/lifetime 15 phút là giới hạn MVP có thể làm file/hash/chờ người dùng lâu bị ngắt. Điều kiện VPS/public TCP và kế hoạch demo Windows<->Ubuntu/Windows<->Windows/hai mạng tại RELAY.md. Không suy diễn demo thực từ CI.
+
+## RELAY-TEST-STABILITY-01 (2026-11-17)
+
+Branch `fix/relay-test-stability`, worktree `C:\Users\PC\Documents\Study\Do_an_4-relay-stability`, base `origin/main` ec82beaafd9f40b634fc30860d7ef7ce8ab83a19. No changes to desktop, the Antigravity worktree, production relay code, public API, TLS, limits or timeouts.
+
+Root cause established: `pairsBothDirectionsAndConsumesCodeExactlyOnce` checked `forwardedBytes >= 4` immediately after receiving the last byte. `Tunnel.pump` writes to the socket before atomically incrementing the byte counter. Receipt does not wait for that later increment; an atomic counter prevents lost updates but does not make the two events simultaneous. This is an asynchronous metric observation race in the test, not evidence of corrupt forwarding or an unsafe increment.
+
+Evidence: preserved the prior integration clean-build XML (failure at RelayServerTest.java:32; both preceding content assertions passed). Relay/protocol source is identical on main and UI-03B. Five unmodified whole RelayServerTest runs on main all pass (60 cases), demonstrating why random reruns alone do not diagnose this failure. An independent JDK JDI probe against unmodified main pauses each real forwarding worker at line 303, after write and before increment: both directions have received correct bytes, immediate metric is 0; after resumption the metric becomes exactly 4. Thus the failing interleaving exists on main and is independent of UI-03B. Only debugger scheduling was controlled; production binaries were not instrumented or changed. Local evidence/probe source is ignored under `.tools/relay-stability/`.
+
+Fix: retain the predicate `forwardedBytes >= 4` and use the existing `eventually` condition helper (existing four-second deadline). Byte content and one-use-code assertions remain unchanged. No arbitrary delay, increased socket timeout, new dependency, weakened bound or production test hook.
+
+Counter/ownership review: connections/pending/tunnels and rate accounting are accessed under the RelayServer monitor; single-use pairing removes the code under that lock; connection/tunnel close uses compareAndSet to make removal idempotent; deadline/activity fields are volatile; forwardedBytes uses AtomicLong. No additional defect established in those paths during this task. Short-lived snapshots can reflect asynchronous cleanup; existing cleanup tests wait for the corresponding state. This review is not a formal proof against all concurrency failures.
+
+Validation on Windows 11 / Temurin 21.0.13+9:
+
+- Before fix: five complete RelayServerTest iterations, 60 PASS; deterministic JDI probe reproduces the original predicate failure on unmodified main (counter 0 after correct receipt, exactly 4 after resume).
+- After fix: ten complete RelayServerTest iterations, 120 PASS / 0 FAIL. Temporary Gradle init tasks are ignored, not build-system changes.
+- `.\gradlew.bat --offline --no-daemon --console=plain clean spotlessCheck build :relay:test :cli:installDist`: BUILD SUCCESSFUL, 53 tasks, 188 cases = 185 PASS / 0 FAIL / 3 SKIP. Includes complete relay suite, TTL/one-time code/rate/session limits/cleanup/backpressure, Core/Crypto and CLI relay integration. CLI tests run an actual relay + receiver + sender in three JVMs for 61 B and 1 MiB, plus a wrong-pin negative case.
+- Three local skips: optional 1 GiB streaming; symlink test requiring Windows privilege; actual Linux POSIX filesystem test on Windows. Local Windows results do not establish Ubuntu or physical Windows↔Ubuntu/Internet/NAT acceptance. GitHub CI is recorded separately for the pushed commit.
+- Total complete local RelayServerTest iterations: 16 (5 before, 10 after, 1 in clean build), below the 20-run cap. No rerun-until-green policy.
+
+This task fixes only test synchronization. PR #5's Desktop disconnect/shutdown cleanup must still pass independent reproduction, integration tests and exact-head CI before it can be considered for merge. No merge of PR #5 is authorized by these results.
