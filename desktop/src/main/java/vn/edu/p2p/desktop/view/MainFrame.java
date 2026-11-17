@@ -59,6 +59,9 @@ public class MainFrame extends JFrame {
     private volatile String initializationError = "";
     private volatile Runnable onShutdownHook;
     private SessionViewModel currentSession = SessionViewModel.createDisconnected();
+    private TransferViewModel currentTransfer = TransferViewModel.createIdle();
+    private long activeSessionGeneration = 0L;
+    private String activeSessionId = "";
 
     /**
      * Constructor mặc định chỉ dành riêng cho unit test, preview UI và chế độ --smoke-test.
@@ -235,8 +238,20 @@ public class MainFrame extends JFrame {
         devicesPanel.setNetworkEnabled(true, "", false);
 
         realAdapter.registerListeners(
-                sessionVm -> SwingUtilities.invokeLater(() -> updateSession(sessionVm)),
-                transferVm -> SwingUtilities.invokeLater(() -> updateTransfer(transferVm)));
+                sessionVm -> {
+                    if (SwingUtilities.isEventDispatchThread()) {
+                        updateSession(sessionVm);
+                    } else {
+                        SwingUtilities.invokeLater(() -> updateSession(sessionVm));
+                    }
+                },
+                transferVm -> {
+                    if (SwingUtilities.isEventDispatchThread()) {
+                        updateTransfer(transferVm);
+                    } else {
+                        SwingUtilities.invokeLater(() -> updateTransfer(transferVm));
+                    }
+                });
 
         if (realAdapter instanceof RealCoreApiAdapter coreAdapter) {
             coreAdapter.setIncomingOfferHandler(this::promptIncomingOfferDialog);
@@ -300,6 +315,10 @@ public class MainFrame extends JFrame {
     }
 
     private void promptIncomingOfferDialog(FileOffer offer, Consumer<File> decisionCallback) {
+        if (resourcesClosed.get() || backendState != BackendState.READY) {
+            decisionCallback.accept(null);
+            return;
+        }
         String message =
                 String.format(
                         """
@@ -364,14 +383,56 @@ public class MainFrame extends JFrame {
 
     /**
      * Cập nhật toàn bộ trạng thái phiên kết nối trên các màn hình và thanh trạng thái.
-     * Ánh xạ chính xác theo các trạng thái an toàn của M2: TCP_CONNECTED, WAITING_FOR_FINGERPRINT,
-     * TLS_HANDSHAKING, SECURE_READY.
+     * Kiểm tra sessionGeneration và sessionId ngay tại thời điểm thực thi trên Swing EDT
+     * để loại bỏ tuyệt đối mọi callback đến muộn từ phiên cũ hoặc sau khi đóng cửa sổ.
      */
     public void updateSession(SessionViewModel session) {
-        this.currentSession = (session != null) ? session : SessionViewModel.createDisconnected();
-        if (backendState != BackendState.READY) {
+        if (resourcesClosed.get() || backendState != BackendState.READY) {
             return;
         }
+        SessionViewModel candidate =
+                (session != null) ? session : SessionViewModel.createDisconnected(activeSessionGeneration);
+
+        long candidateGen = candidate.sessionGeneration();
+        if (candidateGen > 0) {
+            if (candidateGen < activeSessionGeneration) {
+                // Bỏ qua callback đến muộn từ phiên thế hệ cũ
+                return;
+            }
+            if (candidateGen == activeSessionGeneration) {
+                if ((currentSession.state() == SessionState.DISCONNECTED
+                                || currentSession.state() == SessionState.CLOSED)
+                        && candidate.state() != SessionState.DISCONNECTED
+                        && candidate.state() != SessionState.CLOSED) {
+                    return;
+                }
+                if (candidate.state() == SessionState.SECURE_READY
+                        && !activeSessionId.isBlank()
+                        && !activeSessionId.equals(candidate.sessionId())) {
+                    return;
+                }
+            } else {
+                // Chuyển sang thế hệ phiên mới: đặt lại tiến trình truyền cũ để không rò rỉ sang phiên mới
+                activeSessionGeneration = candidateGen;
+                activeSessionId = (candidate.sessionId() != null) ? candidate.sessionId() : "";
+                TransferViewModel idle = TransferViewModel.createIdle(candidateGen);
+                this.currentTransfer = idle;
+                dashboardPanel.updateTransferProgress(idle);
+                transfersPanel.resetToIdle();
+            }
+
+            if (candidate.state() == SessionState.DISCONNECTED
+                    || candidate.state() == SessionState.CLOSED) {
+                activeSessionId = "";
+            } else if (candidate.sessionId() != null && !candidate.sessionId().isBlank()) {
+                activeSessionId = candidate.sessionId();
+            }
+        } else if (activeSessionGeneration > 0) {
+            // Đã kích hoạt theo dõi generation: bỏ qua callback không mang generation hợp lệ
+            return;
+        }
+
+        this.currentSession = candidate;
         dashboardPanel.updateSessionState(currentSession);
         devicesPanel.updateSession(currentSession);
         securityPanel.updateSession(currentSession);
@@ -424,16 +485,42 @@ public class MainFrame extends JFrame {
 
     /**
      * Cập nhật tiến trình truyền tải file trên Dashboard và TransfersPanel.
+     * Bỏ qua callback transfer của thế hệ/phiên cũ hoặc sau khi đóng ứng dụng.
      */
     public void updateTransfer(TransferViewModel transfer) {
-        if (backendState != BackendState.READY) {
+        if (resourcesClosed.get() || backendState != BackendState.READY) {
             return;
         }
-        dashboardPanel.updateTransferProgress(transfer);
-        transfersPanel.updateTransferProgress(transfer);
         if (transfer != null) {
-            statusBarPanel.setNetworkSpeed("Tốc độ: " + transfer.getFormattedSpeed());
+            long transferGen = transfer.sessionGeneration();
+            if (transferGen > 0) {
+                if (transferGen < activeSessionGeneration) {
+                    return;
+                }
+                if (!activeSessionId.isBlank()
+                        && transfer.sessionId() != null
+                        && !transfer.sessionId().isBlank()
+                        && !activeSessionId.equals(transfer.sessionId())) {
+                    return;
+                }
+            } else if (activeSessionGeneration > 0
+                    && transfer.state() != TransferViewModel.TransferState.IDLE) {
+                return;
+            }
         }
+
+        this.currentTransfer = (transfer != null) ? transfer : TransferViewModel.createIdle();
+        dashboardPanel.updateTransferProgress(currentTransfer);
+        transfersPanel.updateTransferProgress(currentTransfer);
+        statusBarPanel.setNetworkSpeed("Tốc độ: " + currentTransfer.getFormattedSpeed());
+    }
+
+    public SessionViewModel getCurrentSession() {
+        return currentSession;
+    }
+
+    public TransferViewModel getCurrentTransfer() {
+        return currentTransfer;
     }
 
     public BackendState getBackendState() {

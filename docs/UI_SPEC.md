@@ -154,24 +154,27 @@ public interface CoreApiAdapter {
   - Khi thành công, backend thật được gắn trên EDT (`attachBackendAdapter`), hiển thị fingerprint thật, cổng LAN thật và mở khóa kết nối.
   - Khi thất bại, ứng dụng chuyển sang trạng thái lỗi (`FAILED`), báo lỗi rõ ràng, giữ nguyên khóa toàn bộ chức năng mạng, không hiển thị fingerprint giả và không giả lập `SECURE_READY`.
   - Đóng cửa sổ (`windowClosing` / `dispose`) tự động hủy worker khởi tạo và gọi `adapter.shutdown()`.
-- **`RealCoreApiAdapter`**:
-  - Quản lý vòng đời `PeerNode`, `PeerListener` và `TransferSession`.
+- **`RealCoreApiAdapter` & Chống Stale Callback theo Generation**:
+  - Quản lý vòng đời `PeerNode`, `PeerListener` và `TransferSession` gắn với `sessionGeneration` bất biến tăng đơn điệu cho từng phiên.
   - Mọi tác vụ I/O, handshake, truyền tải chạy trên `Executors.newVirtualThreadPerTaskExecutor()`.
-  - Toàn bộ cập nhật giao diện (Session updates, Transfer updates, Incoming offer popups) được marshalling an toàn về Event Dispatch Thread (EDT) bằng `SwingUtilities.invokeLater`.
+  - Khi ngắt kết nối, thay phiên hoặc shutdown, thế hệ cũ bị vô hiệu hóa ngay lập tức và `closeSessionIfMatches` chỉ đóng phiên tương ứng (không bao giờ đóng nhầm phiên mới).
+  - Mọi callback (`SECURE_READY`, `ERROR`, `OFFER`, `TRANSFER`, `CANCEL`) đều kiểm tra `sessionGeneration`/`sessionId` cả trước khi xếp hàng và **tại thời điểm thực thi thực sự trên Swing EDT** (trên cả `RealCoreApiAdapter` lẫn `MainFrame`), đảm bảo callback đến muộn của phiên A không bao giờ bật nút Send hay ghi đè trạng thái của phiên B.
 
 ### 8.2. Quản lý Danh tính Cục bộ & Mật khẩu An toàn (`LocalIdentityHelper`)
 - Vị trí lưu trữ mặc định (luôn nằm ngoài repository): `%LOCALAPPDATA%/P2pFileTransfer/` (Windows) hoặc `~/.local/share/p2p-file-transfer/` (Linux).
 - Có thể phân biệt tên instance hợp lệ (`[a-zA-Z0-9._-]`, chống path traversal) qua cờ `--name=alice` hoặc `--name=bob`.
-- **Chính sách bảo vệ tệp nhạy cảm (Fail-Closed)**:
+- **Chính sách bảo vệ thư mục & tệp nhạy cảm (Fail-Closed)**:
   - Không hardcode mật khẩu; không ghi mật khẩu ra log hoặc Preferences; không nhận mật khẩu qua tham số dòng lệnh (`argv`).
   - Hỗ trợ cung cấp mật khẩu qua biến môi trường (`P2P_PASSWORD_ENV` hoặc `P2P_IDENTITY_PASSWORD`). Nếu không đặt biến môi trường, hệ thống tự sinh mật khẩu ngẫu nhiên 128-bit entropy (32 ký tự hex) bằng `SecureRandom`.
-  - Chống symbolic-link attack và chống ghi đè tệp nhạy cảm bằng `LinkOption.NOFOLLOW_LINKS` và tạo tệp nguyên tử `CREATE_NEW`.
-  - **Linux**: Bắt buộc quyền `0600` (`rw-------`) cho tệp `.pass` và `.p12`, quyền `0700` cho thư mục mới tạo.
-  - **Windows**: Bắt buộc áp dụng `AclFileAttributeView` giới hạn quyền truy cập chỉ cho tài khoản người dùng hiện tại trước khi ghi byte mật khẩu và sau khi `keytool` sinh `.p12`.
-  - Nếu không thể áp dụng hoặc xác nhận quyền truy cập an toàn, hệ thống xóa tệp tạo dở và ném `IOException` (fail-closed) thay vì tiếp tục không an toàn.
+  - Kiểm tra symbolic link trên **toàn bộ thành phần đường dẫn cha**, thư mục identity, `.p12` và `.pass`; tạo tệp bí mật mới nguyên tử (`CREATE_NEW`), không ghi đè tệp hiện có.
+  - **Xác minh thư mục identity (cả thư mục mới lẫn thư mục đã tồn tại) TRƯỚC KHI ghi `.pass` hoặc chạy `keytool`**:
+    - **Linux/POSIX**: Thư mục phải thuộc owner hiện tại và đúng quyền `0700` (`rwx------`); từ chối `0777` hoặc group-accessible. Tệp `.p12`/`.pass` hiện có phải đúng owner và quyền `<= 0600`.
+    - **Windows ACL**: Xác minh owner và toàn bộ ACE hiệu lực (kể cả ACE kế thừa `INHERIT_ONLY`/`FILE_INHERIT`); từ chối mọi quyền nhạy cảm cấp cho `Everyone`, `Guests`, `Users`, `Authenticated Users` hoặc principal không tin cậy khác. Không tự động sửa ACL của thư mục cũ không hợp lệ.
+  - Nếu kiểm tra hoặc siết quyền thất bại, hệ thống xóa tệp tạo dở (không xóa identity cũ) và ném `IOException` (fail-closed).
   - `keytool` nhận mật khẩu qua biến môi trường cục bộ `-storepass:env P2P_KEYTOOL_PASS`; toàn bộ mảng `char[]`/`byte[]` mật khẩu được xóa trong `finally`.
-- **Giới hạn bảo mật MVP**:
-  - Lưu mật khẩu trong tệp `.pass` cục bộ kèm quyền OS (`0600` / Windows ACL) chỉ ngăn chặn tài khoản OS khác trên cùng máy đọc tệp, **không tương đương với mã hóa secret bằng OS Credential Manager** (Windows DPAPI/Credential Manager, Linux Secret Service/libsecret). Trong môi trường yêu cầu cao hơn, người dùng nên truyền mật khẩu thông qua biến môi trường được quản lý bởi vault/OS credential manager.
+- **Giới hạn bảo mật & TOCTOU còn lại**:
+  - Lưu mật khẩu trong tệp `.pass` cục bộ kèm quyền OS (`0600` / Windows ACL) chỉ ngăn chặn tài khoản OS khác trên cùng máy đọc tệp, **không tương đương với mã hóa secret bằng OS Credential Manager** (Windows DPAPI/Credential Manager, Linux Secret Service/libsecret).
+  - Do `keytool` là tiến trình con bên ngoài nhận đường dẫn tệp thay vì file descriptor, vẫn tồn tại cửa sổ TOCTOU hẹp nếu một tiến trình đặc quyền cao hoặc cùng tài khoản sửa đổi quyền thư mục ngay trong lúc `keytool` chạy; rủi ro này được giảm thiểu bằng việc xác minh thư mục trước khi gọi `keytool`, kiểm tra lại `NOFOLLOW_LINKS` và xác nhận ACL/0600 ngay khi `keytool` kết thúc.
 
 ### 8.3. Phương thức Khởi chạy Ứng dụng Thực tế (Đã xác minh)
 Module `desktop` là ứng dụng đa module phụ thuộc vào `:core`, `:crypto`, `:protocol` và FlatLaf. Tệp `desktop.jar` thông thường không chứa fat-jar bundle, do đó **không sử dụng `java -jar desktop.jar`**. Sử dụng một trong hai phương thức chuẩn hóa sau:

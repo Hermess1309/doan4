@@ -1,5 +1,6 @@
 package vn.edu.p2p.desktop.adapter;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -12,9 +13,14 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.attribute.AclEntry;
+import java.nio.file.attribute.AclEntryFlag;
+import java.nio.file.attribute.AclEntryPermission;
+import java.nio.file.attribute.AclEntryType;
 import java.nio.file.attribute.AclFileAttributeView;
 import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.nio.file.attribute.UserPrincipal;
+import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Set;
@@ -41,7 +47,6 @@ class LocalIdentityHelperTest {
         assertRestrictedPermissions(storePath);
         assertRestrictedPermissions(passFile);
 
-        // Tệp mật khẩu phải là chuỗi 32 hex ngẫu nhiên (128-bit entropy), không phải mật khẩu yếu mặc định
         String passContent = Files.readString(passFile, StandardCharsets.UTF_8).trim();
         assertEquals(32, passContent.length());
         assertTrue(passContent.matches("^[0-9a-f]{32}$"));
@@ -49,7 +54,7 @@ class LocalIdentityHelperTest {
 
     @Test
     void testExistingIdentityReloadsSameFingerprint(@TempDir Path tempDir) throws Exception {
-        Path storePath = tempDir.resolve("bob.p12");
+        Path storePath = tempDir.resolve("bob-dir").resolve("bob.p12");
 
         PeerNode firstLoad = LocalIdentityHelper.getOrCreateIdentity(storePath);
         PeerNode secondLoad = LocalIdentityHelper.getOrCreateIdentity(storePath);
@@ -61,8 +66,287 @@ class LocalIdentityHelperTest {
     }
 
     @Test
+    void testWindowsExistingDirectoryWithEveryoneFullControlIsRejected(@TempDir Path tempDir)
+            throws Exception {
+        Assumptions.assumeTrue(
+                tempDir.getFileSystem().supportedFileAttributeViews().contains("acl")
+                        && !tempDir.getFileSystem().supportedFileAttributeViews().contains("posix"),
+                "Test Windows ACL chỉ chạy trên hệ thống tệp hỗ trợ Windows ACL");
+
+        Path insecureDir = Files.createDirectory(tempDir.resolve("everyone-full-dir"));
+        AclFileAttributeView aclView =
+                Files.getFileAttributeView(insecureDir, AclFileAttributeView.class, LinkOption.NOFOLLOW_LINKS);
+        UserPrincipal everyone =
+                insecureDir.getFileSystem().getUserPrincipalLookupService().lookupPrincipalByName("Everyone");
+        UserPrincipal currentUser =
+                insecureDir
+                        .getFileSystem()
+                        .getUserPrincipalLookupService()
+                        .lookupPrincipalByName(System.getProperty("user.name"));
+
+        List<AclEntry> insecureAcl =
+                List.of(
+                        AclEntry.newBuilder()
+                                .setType(AclEntryType.ALLOW)
+                                .setPrincipal(currentUser)
+                                .setFlags(AclEntryFlag.FILE_INHERIT, AclEntryFlag.DIRECTORY_INHERIT)
+                                .setPermissions(EnumSet.allOf(AclEntryPermission.class))
+                                .build(),
+                        AclEntry.newBuilder()
+                                .setType(AclEntryType.ALLOW)
+                                .setPrincipal(everyone)
+                                .setFlags(AclEntryFlag.FILE_INHERIT, AclEntryFlag.DIRECTORY_INHERIT)
+                                .setPermissions(EnumSet.allOf(AclEntryPermission.class))
+                                .build());
+        aclView.setAcl(insecureAcl);
+
+        Path storePath = insecureDir.resolve("alice.p12");
+        Path passFile = LocalIdentityHelper.resolvePasswordFile(storePath);
+
+        IOException ex =
+                assertThrows(
+                        IOException.class, () -> LocalIdentityHelper.getOrCreateIdentity(storePath));
+        assertTrue(
+                ex.getMessage().contains("ACL không an toàn"),
+                "Phải từ chối thư mục Windows Everyone Full Control: " + ex.getMessage());
+        assertFalse(
+                Files.exists(storePath, LinkOption.NOFOLLOW_LINKS),
+                "Không được tạo keystore trong thư mục Everyone Full Control");
+        assertFalse(
+                Files.exists(passFile, LinkOption.NOFOLLOW_LINKS),
+                "Không được tạo tệp .pass trong thư mục Everyone Full Control");
+    }
+
+    @Test
+    void testWindowsExistingDirectoryWithSecureAclIsAccepted(@TempDir Path tempDir) throws Exception {
+        Assumptions.assumeTrue(
+                tempDir.getFileSystem().supportedFileAttributeViews().contains("acl")
+                        && !tempDir.getFileSystem().supportedFileAttributeViews().contains("posix"),
+                "Test Windows ACL chỉ chạy trên hệ thống tệp hỗ trợ Windows ACL");
+
+        Path secureDir = Files.createDirectory(tempDir.resolve("secure-existing-win-dir"));
+        LocalIdentityHelper.restrictDirectoryToCurrentUser(secureDir);
+
+        Path storePath = secureDir.resolve("secure-peer.p12");
+        PeerNode node = LocalIdentityHelper.getOrCreateIdentity(storePath);
+
+        assertNotNull(node);
+        assertEquals(64, node.localFingerprint().length());
+        assertTrue(Files.isRegularFile(storePath, LinkOption.NOFOLLOW_LINKS));
+    }
+
+    @Test
+    void testWindowsExistingSecretFileWithEveryoneAccessIsRejected(@TempDir Path tempDir)
+            throws Exception {
+        Assumptions.assumeTrue(
+                tempDir.getFileSystem().supportedFileAttributeViews().contains("acl")
+                        && !tempDir.getFileSystem().supportedFileAttributeViews().contains("posix"),
+                "Test Windows ACL chỉ chạy trên hệ thống tệp hỗ trợ Windows ACL");
+
+        Path secureDir = tempDir.resolve("secret-exposed-dir");
+        Path storePath = secureDir.resolve("exposed.p12");
+        Path passFile = LocalIdentityHelper.resolvePasswordFile(storePath);
+
+        // Tạo identity hợp lệ trước
+        LocalIdentityHelper.getOrCreateIdentity(storePath);
+
+        // Cố tình cấp Everyone quyền đọc trên tệp .pass
+        AclFileAttributeView passAcl =
+                Files.getFileAttributeView(passFile, AclFileAttributeView.class, LinkOption.NOFOLLOW_LINKS);
+        UserPrincipal everyone =
+                passFile.getFileSystem().getUserPrincipalLookupService().lookupPrincipalByName("Everyone");
+        List<AclEntry> widened = new ArrayList<>(passAcl.getAcl());
+        widened.add(
+                AclEntry.newBuilder()
+                        .setType(AclEntryType.ALLOW)
+                        .setPrincipal(everyone)
+                        .setPermissions(AclEntryPermission.READ_DATA)
+                        .build());
+        passAcl.setAcl(widened);
+
+        IOException ex =
+                assertThrows(
+                        IOException.class, () -> LocalIdentityHelper.getOrCreateIdentity(storePath));
+        assertTrue(
+                ex.getMessage().contains("ACL không an toàn"),
+                "Phải từ chối tệp .pass đã bị mở quyền cho Everyone: " + ex.getMessage());
+    }
+
+    @Test
+    void testLinuxPosixExistingDirectory0777RejectedAnd0700Accepted(@TempDir Path tempDir)
+            throws Exception {
+        Assumptions.assumeTrue(
+                tempDir.getFileSystem().supportedFileAttributeViews().contains("posix"),
+                "Test POSIX thật chạy trên Ubuntu/Linux");
+
+        // 1. Thư mục 0777 phải bị từ chối và không tạo bất kỳ file bí mật nào
+        Path worldWritableDir = Files.createDirectory(tempDir.resolve("posix-0777-dir"));
+        Files.setPosixFilePermissions(worldWritableDir, PosixFilePermissions.fromString("rwxrwxrwx"));
+
+        Path rejectedStore = worldWritableDir.resolve("alice.p12");
+        Path rejectedPass = LocalIdentityHelper.resolvePasswordFile(rejectedStore);
+
+        IOException ex =
+                assertThrows(
+                        IOException.class, () -> LocalIdentityHelper.getOrCreateIdentity(rejectedStore));
+        assertTrue(ex.getMessage().contains("POSIX không an toàn"));
+        assertFalse(Files.exists(rejectedStore, LinkOption.NOFOLLOW_LINKS));
+        assertFalse(Files.exists(rejectedPass, LinkOption.NOFOLLOW_LINKS));
+
+        // 2. Thư mục 0700 đúng owner phải được chấp nhận
+        Path privateDir = Files.createDirectory(tempDir.resolve("posix-0700-dir"));
+        Files.setPosixFilePermissions(privateDir, PosixFilePermissions.fromString("rwx------"));
+
+        Path acceptedStore = privateDir.resolve("bob.p12");
+        PeerNode node = LocalIdentityHelper.getOrCreateIdentity(acceptedStore);
+        assertNotNull(node);
+        assertEquals(64, node.localFingerprint().length());
+
+        // 3. Tệp .pass hiện có bị đổi sang 0644 phải bị từ chối khi nạp lại
+        Path acceptedPass = LocalIdentityHelper.resolvePasswordFile(acceptedStore);
+        Files.setPosixFilePermissions(acceptedPass, PosixFilePermissions.fromString("rw-r--r--"));
+        assertThrows(IOException.class, () -> LocalIdentityHelper.getOrCreateIdentity(acceptedStore));
+    }
+
+    @Test
+    void testPosixValidationRulesDirectlyAcrossPlatforms(@TempDir Path tempDir) {
+        UserPrincipal owner = () -> "alice";
+        UserPrincipal otherUser = () -> "mallory";
+
+        // 0700 đúng owner -> hợp lệ
+        assertDoesNotThrow(
+                () ->
+                        LocalIdentityHelper.validatePosixDirectoryPermissions(
+                                tempDir, owner, owner, PosixFilePermissions.fromString("rwx------")));
+
+        // 0777 -> bị từ chối
+        assertThrows(
+                IOException.class,
+                () ->
+                        LocalIdentityHelper.validatePosixDirectoryPermissions(
+                                tempDir, owner, owner, PosixFilePermissions.fromString("rwxrwxrwx")));
+
+        // 0750 (group accessible) -> bị từ chối
+        assertThrows(
+                IOException.class,
+                () ->
+                        LocalIdentityHelper.validatePosixDirectoryPermissions(
+                                tempDir, owner, owner, PosixFilePermissions.fromString("rwxr-x---")));
+
+        // Sai owner -> bị từ chối
+        assertThrows(
+                IOException.class,
+                () ->
+                        LocalIdentityHelper.validatePosixDirectoryPermissions(
+                                tempDir, otherUser, owner, PosixFilePermissions.fromString("rwx------")));
+
+        // File 0600 đúng owner -> hợp lệ; 0644 -> bị từ chối
+        assertDoesNotThrow(
+                () ->
+                        LocalIdentityHelper.validatePosixFilePermissions(
+                                tempDir.resolve("a.pass"),
+                                owner,
+                                owner,
+                                PosixFilePermissions.fromString("rw-------")));
+        assertThrows(
+                IOException.class,
+                () ->
+                        LocalIdentityHelper.validatePosixFilePermissions(
+                                tempDir.resolve("a.pass"),
+                                owner,
+                                owner,
+                                PosixFilePermissions.fromString("rw-r--r--")));
+    }
+
+    @Test
+    void testWindowsAclValidationRejectsUntrustedPrincipalsAndWrongOwner(@TempDir Path tempDir) {
+        UserPrincipal currentUser = () -> "DESKTOP\\Alice";
+        UserPrincipal otherUser = () -> "DESKTOP\\Bob";
+        UserPrincipal system = () -> "NT AUTHORITY\\SYSTEM";
+        UserPrincipal admins = () -> "BUILTIN\\Administrators";
+        UserPrincipal creatorOwner = () -> "CREATOR OWNER";
+        UserPrincipal everyone = () -> "Everyone";
+        UserPrincipal guests = () -> "BUILTIN\\Guests";
+
+        AclEntry aliceFull =
+                AclEntry.newBuilder()
+                        .setType(AclEntryType.ALLOW)
+                        .setPrincipal(currentUser)
+                        .setPermissions(EnumSet.allOf(AclEntryPermission.class))
+                        .build();
+        AclEntry everyoneRead =
+                AclEntry.newBuilder()
+                        .setType(AclEntryType.ALLOW)
+                        .setPrincipal(everyone)
+                        .setPermissions(AclEntryPermission.READ_DATA)
+                        .build();
+        AclEntry guestsInheritedWrite =
+                AclEntry.newBuilder()
+                        .setType(AclEntryType.ALLOW)
+                        .setPrincipal(guests)
+                        .setFlags(AclEntryFlag.FILE_INHERIT, AclEntryFlag.INHERIT_ONLY)
+                        .setPermissions(AclEntryPermission.WRITE_DATA)
+                        .build();
+
+        // Owner hợp lệ + chỉ currentUser -> hợp lệ
+        assertDoesNotThrow(
+                () ->
+                        LocalIdentityHelper.validateWindowsAcl(
+                                tempDir,
+                                true,
+                                currentUser,
+                                currentUser,
+                                system,
+                                admins,
+                                creatorOwner,
+                                List.of(aliceFull)));
+
+        // Có Everyone -> bị từ chối
+        assertThrows(
+                IOException.class,
+                () ->
+                        LocalIdentityHelper.validateWindowsAcl(
+                                tempDir,
+                                true,
+                                currentUser,
+                                currentUser,
+                                system,
+                                admins,
+                                creatorOwner,
+                                List.of(aliceFull, everyoneRead)));
+
+        // Có Guests qua ACE kế thừa (INHERIT_ONLY) -> bị từ chối
+        assertThrows(
+                IOException.class,
+                () ->
+                        LocalIdentityHelper.validateWindowsAcl(
+                                tempDir,
+                                true,
+                                currentUser,
+                                currentUser,
+                                system,
+                                admins,
+                                creatorOwner,
+                                List.of(aliceFull, guestsInheritedWrite)));
+
+        // Thư mục thuộc chủ sở hữu khác -> bị từ chối
+        assertThrows(
+                IOException.class,
+                () ->
+                        LocalIdentityHelper.validateWindowsAcl(
+                                tempDir,
+                                true,
+                                otherUser,
+                                currentUser,
+                                system,
+                                admins,
+                                creatorOwner,
+                                List.of(aliceFull)));
+    }
+
+    @Test
     void testFailsClosedWhenPermissionRestrictionFails(@TempDir Path tempDir) throws IOException {
-        Path storePath = tempDir.resolve("perm-fail.p12");
+        Path storePath = tempDir.resolve("perm-fail-dir").resolve("perm-fail.p12");
         Path passFile = LocalIdentityHelper.resolvePasswordFile(storePath);
 
         LocalIdentityHelper.PermissionEnforcer failingEnforcer =
@@ -73,9 +357,13 @@ class LocalIdentityHelperTest {
                     }
 
                     @Override
-                    public void restrictDirectory(Path directory) throws IOException {
-                        // Cho phép tạo thư mục để kiểm tra lỗi quyền trên file nhạy cảm
-                    }
+                    public void restrictDirectory(Path directory) throws IOException {}
+
+                    @Override
+                    public void verifyExistingFile(Path file) throws IOException {}
+
+                    @Override
+                    public void verifyExistingDirectory(Path directory) throws IOException {}
                 };
 
         IOException ex =
@@ -92,9 +380,13 @@ class LocalIdentityHelperTest {
 
     @Test
     void testCorruptedKeystoreOrMissingPasswordFailsSafely(@TempDir Path tempDir) throws Exception {
+        Path secureDir = Files.createDirectory(tempDir.resolve("corrupt-tests"));
+        LocalIdentityHelper.restrictDirectoryToCurrentUser(secureDir);
+
         // Trường hợp 1: Keystore tồn tại nhưng thiếu tệp .pass
-        Path missingPassStore = tempDir.resolve("orphan.p12");
+        Path missingPassStore = secureDir.resolve("orphan.p12");
         Files.writeString(missingPassStore, "dummy-keystore-bytes", StandardCharsets.UTF_8);
+        LocalIdentityHelper.restrictFileToCurrentUser(missingPassStore);
 
         IOException missingPassEx =
                 assertThrows(
@@ -102,17 +394,20 @@ class LocalIdentityHelperTest {
         assertTrue(missingPassEx.getMessage().contains("không tìm thấy tệp mật khẩu"));
 
         // Trường hợp 2: Keystore bị hỏng dữ liệu nhưng có .pass
-        Path corruptedStore = tempDir.resolve("corrupted.p12");
+        Path corruptedStore = secureDir.resolve("corrupted.p12");
         Path corruptedPass = LocalIdentityHelper.resolvePasswordFile(corruptedStore);
         Files.writeString(corruptedStore, "not-a-valid-pkcs12-file", StandardCharsets.UTF_8);
         Files.writeString(corruptedPass, "0123456789abcdef0123456789abcdef", StandardCharsets.UTF_8);
+        LocalIdentityHelper.restrictFileToCurrentUser(corruptedStore);
+        LocalIdentityHelper.restrictFileToCurrentUser(corruptedPass);
 
         assertThrows(Exception.class, () -> LocalIdentityHelper.getOrCreateIdentity(corruptedStore));
 
         // Trường hợp 3: Tệp .pass tồn tại sẵn nhưng chưa có keystore -> từ chối ghi đè
-        Path orphanPassStore = tempDir.resolve("preplanted.p12");
+        Path orphanPassStore = secureDir.resolve("preplanted.p12");
         Path orphanPass = LocalIdentityHelper.resolvePasswordFile(orphanPassStore);
         Files.writeString(orphanPass, "preplanted-secret", StandardCharsets.UTF_8);
+        LocalIdentityHelper.restrictFileToCurrentUser(orphanPass);
 
         IOException overwriteEx =
                 assertThrows(
@@ -122,8 +417,7 @@ class LocalIdentityHelperTest {
 
     @Test
     void testKeytoolFailureCleansUpAndFailsSafely(@TempDir Path tempDir) throws IOException {
-        // 1. Lỗi keytool runner ném IOException (mô phỏng exit code != 0)
-        Path storePath = tempDir.resolve("keytool-fail.p12");
+        Path storePath = tempDir.resolve("keytool-fail-dir").resolve("keytool-fail.p12");
         Path passFile = LocalIdentityHelper.resolvePasswordFile(storePath);
 
         LocalIdentityHelper.KeytoolRunner failingKeytool =
@@ -143,9 +437,8 @@ class LocalIdentityHelperTest {
         assertFalse(Files.exists(storePath, LinkOption.NOFOLLOW_LINKS), "Phải xóa keystore tạo dở");
         assertFalse(Files.exists(passFile, LinkOption.NOFOLLOW_LINKS), "Phải xóa tệp .pass khi tạo thất bại");
 
-        // 2. Đường dẫn keytool không tồn tại
         Path missingKeytool = tempDir.resolve("non-existent-keytool");
-        Path anotherStore = tempDir.resolve("missing-keytool.p12");
+        Path anotherStore = tempDir.resolve("missing-keytool-dir").resolve("missing-keytool.p12");
         IOException missingToolEx =
                 assertThrows(
                         IOException.class,
@@ -156,7 +449,8 @@ class LocalIdentityHelperTest {
     }
 
     @Test
-    void testResolvePasswordFileNeverCollidesWithNonP12StoreName(@TempDir Path tempDir) throws IOException {
+    void testResolvePasswordFileNeverCollidesWithNonP12StoreName(@TempDir Path tempDir)
+            throws IOException {
         Path customStore = tempDir.resolve("peer.keystore");
         Path passFile = LocalIdentityHelper.resolvePasswordFile(customStore);
 
@@ -165,21 +459,33 @@ class LocalIdentityHelperTest {
     }
 
     @Test
-    void testRejectsSymbolicLinkForSecretFiles(@TempDir Path tempDir) throws IOException {
+    void testRejectsSymbolicLinkForDirectoryAndSecretFiles(@TempDir Path tempDir) throws IOException {
+        Path realDir = Files.createDirectory(tempDir.resolve("real-target-dir"));
         Path target = tempDir.resolve("victim.txt");
         Files.writeString(target, "do-not-touch", StandardCharsets.UTF_8);
 
+        Path symlinkDir = tempDir.resolve("symlink-identity-dir");
         Path symlinkStore = tempDir.resolve("symlink-peer.p12");
         try {
+            Files.createSymbolicLink(symlinkDir, realDir);
             Files.createSymbolicLink(symlinkStore, target);
         } catch (UnsupportedOperationException | IOException | SecurityException e) {
-            Assumptions.assumeTrue(false, "OS hiện tại không cấp quyền tạo symbolic link cho test: " + e.getMessage());
+            Assumptions.assumeTrue(
+                    false, "OS hiện tại không cấp quyền tạo symbolic link cho test: " + e.getMessage());
         }
 
-        IOException ex =
+        // Thư mục symlink bị từ chối
+        IOException dirEx =
+                assertThrows(
+                        IOException.class,
+                        () -> LocalIdentityHelper.getOrCreateIdentity(symlinkDir.resolve("alice.p12")));
+        assertTrue(dirEx.getMessage().contains("symbolic link"));
+
+        // Tệp keystore symlink bị từ chối và không ghi đè victim
+        IOException fileEx =
                 assertThrows(
                         IOException.class, () -> LocalIdentityHelper.getOrCreateIdentity(symlinkStore));
-        assertTrue(ex.getMessage().contains("symbolic link"));
+        assertTrue(fileEx.getMessage().contains("symbolic link"));
         assertEquals("do-not-touch", Files.readString(target, StandardCharsets.UTF_8));
     }
 

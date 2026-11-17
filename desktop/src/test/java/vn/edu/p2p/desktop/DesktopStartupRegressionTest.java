@@ -45,7 +45,7 @@ class DesktopStartupRegressionTest {
         AtomicReference<DesktopApplication.StartupHandle> handleRef = new AtomicReference<>();
         AtomicReference<RealCoreApiAdapter> createdAdapterRef = new AtomicReference<>();
 
-        Path storePath = tempDir.resolve("startup-ok.p12");
+        Path storePath = tempDir.resolve("startup-id").resolve("startup-ok.p12");
 
         try {
             SwingUtilities.invokeAndWait(

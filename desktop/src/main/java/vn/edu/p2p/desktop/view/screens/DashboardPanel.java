@@ -199,26 +199,29 @@ public class DashboardPanel extends JPanel {
         fileChooser.setDialogTitle("Chọn tệp tin cần gửi qua P2P");
         int result = fileChooser.showOpenDialog(this);
         if (result == JFileChooser.APPROVE_OPTION) {
-            File selected = fileChooser.getSelectedFile();
-            if (selected == null) {
-                return;
-            }
-            if (!ValidationUtils.isValidReadableFile(selected)) {
-                lblFileError.setText("Lỗi: Tệp tin không tồn tại, là thư mục hoặc không có quyền đọc!");
-                lblSelectedFile.setText("Tệp không hợp lệ");
-                lblFileSize.setText("");
-                lblFilePath.setText(selected.getAbsolutePath());
-                currentSelectedFile = null;
-            } else {
-                currentSelectedFile = selected;
-                lblFileError.setText("");
-                lblSelectedFile.setText(selected.getName());
-                lblSelectedFile.setFont(lblSelectedFile.getFont().deriveFont(Font.BOLD));
-                lblFileSize.setText("(" + Formatters.formatBytes(selected.length()) + ")");
-                lblFilePath.setText("Đường dẫn: " + selected.getAbsolutePath());
-            }
-            updateSendButtonState();
+            setSelectedFile(fileChooser.getSelectedFile());
         }
+    }
+
+    public void setSelectedFile(File selected) {
+        if (selected == null) {
+            return;
+        }
+        if (!ValidationUtils.isValidReadableFile(selected)) {
+            lblFileError.setText("Lỗi: Tệp tin không tồn tại, là thư mục hoặc không có quyền đọc!");
+            lblSelectedFile.setText("Tệp không hợp lệ");
+            lblFileSize.setText("");
+            lblFilePath.setText(selected.getAbsolutePath());
+            currentSelectedFile = null;
+        } else {
+            currentSelectedFile = selected;
+            lblFileError.setText("");
+            lblSelectedFile.setText(selected.getName());
+            lblSelectedFile.setFont(lblSelectedFile.getFont().deriveFont(Font.BOLD));
+            lblFileSize.setText("(" + Formatters.formatBytes(selected.length()) + ")");
+            lblFilePath.setText("Đường dẫn: " + selected.getAbsolutePath());
+        }
+        updateSendButtonState();
     }
 
     public void updateSessionState(SessionViewModel session) {

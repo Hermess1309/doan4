@@ -125,29 +125,38 @@ public class SecurityPanel extends JPanel {
 
         // Sự kiện mở Dialog xác minh thật khi có phiên
         btnOpenVerificationDialog.addActionListener(e -> {
-            if (currentSession.sessionId().isBlank()) {
+            if (!backendReady || currentSession.sessionId().isBlank()) {
                 return;
             }
+            final String dialogSessionId = currentSession.sessionId();
+            final long dialogGeneration = currentSession.sessionGeneration();
             Frame owner = (Frame) SwingUtilities.getWindowAncestor(this);
             FingerprintVerificationDialog dialog = new FingerprintVerificationDialog(
-                    owner, currentSession.sessionId(), currentSession.remoteAddress(),
+                    owner, dialogSessionId, currentSession.remoteAddress(),
                     currentSession.localFingerprintRaw(), currentSession.expectedRemoteFingerprintRaw(),
                     false); // isPreviewMode = false
 
             dialog.setOnFingerprintConfirmed(verifiedPin -> {
+                // Kiểm tra phiên chưa bị thay đổi trong lúc hộp thoại đang mở
+                if (!backendReady
+                        || !dialogSessionId.equals(currentSession.sessionId())
+                        || dialogGeneration != currentSession.sessionGeneration()) {
+                    return;
+                }
                 // Người dùng đã nhập và xác nhận pin vân tay đối tác -> chuyển sang trạng thái bắt tay TLS
                 // Tuyệt đối KHÔNG tự ý chuyển sang SECURE_READY ở đây, phải chờ kết quả handshake từ backend!
                 updateSession(new SessionViewModel(
-                        currentSession.sessionId(),
+                        dialogSessionId,
                         currentSession.remoteAddress(),
                         currentSession.localFingerprintRaw(),
                         verifiedPin,
                         currentSession.isRelay(),
                         SessionState.TLS_HANDSHAKING,
-                        ""));
+                        "",
+                        dialogGeneration));
 
                 if (onTlsHandshakeRequested != null) {
-                    onTlsHandshakeRequested.accept(currentSession.sessionId(), verifiedPin);
+                    onTlsHandshakeRequested.accept(dialogSessionId, verifiedPin);
                 }
             });
 

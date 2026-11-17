@@ -57,8 +57,8 @@ class RealCoreApiAdapterTest {
         new SecureRandom().nextBytes(randomBytes);
         testPassword = HexFormat.of().formatHex(randomBytes).toCharArray();
         Arrays.fill(randomBytes, (byte) 0);
-        Path aliceStore = identitiesDir.resolve("alice.p12");
-        Path bobStore = identitiesDir.resolve("bob.p12");
+        Path aliceStore = identitiesDir.resolve("alice-id").resolve("alice.p12");
+        Path bobStore = identitiesDir.resolve("bob-id").resolve("bob.p12");
 
         LocalIdentityHelper.generateIdentityWithKeytool(aliceStore, testPassword, "peer");
         LocalIdentityHelper.generateIdentityWithKeytool(bobStore, testPassword, "peer");
@@ -285,6 +285,76 @@ class RealCoreApiAdapterTest {
         assertThrows(
                 ExecutionException.class,
                 () -> adapterAlice.connectDirect("127.0.0.1", bobPort).get(5, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void testAdapterDropsStaleSessionAndTransferCallbacksHeadlessSafe() throws Exception {
+        List<SessionViewModel> receivedSessions = new ArrayList<>();
+        List<TransferViewModel> receivedTransfers = new ArrayList<>();
+        adapterAlice.registerListeners(receivedSessions::add, receivedTransfers::add);
+
+        // Session A -> genA
+        SessionViewModel sessionA =
+                adapterAlice.connectDirect("127.0.0.1", adapterBob.getListenPort()).get(10, TimeUnit.SECONDS);
+        long genA = sessionA.sessionGeneration();
+        assertTrue(genA > 0);
+
+        // Thay thế bằng disconnect -> gen mới > genA (vô hiệu hóa genA)
+        adapterAlice.disconnect(sessionA.sessionId()).get(5, TimeUnit.SECONDS);
+        long genAfterDisconnect = adapterAlice.getActiveGeneration();
+        assertTrue(genAfterDisconnect > genA);
+
+        javax.swing.SwingUtilities.invokeAndWait(() -> {});
+        int sessionCountBeforeStale = receivedSessions.size();
+        int transferCountBeforeStale = receivedTransfers.size();
+
+        // Gửi callback SECURE_READY, ERROR và TRANSFER mang genA cũ -> bắt buộc bị loại bỏ
+        adapterAlice.dispatchSessionUpdate(
+                genA,
+                new SessionViewModel(
+                        sessionA.sessionId(),
+                        sessionA.remoteAddress(),
+                        adapterAlice.getLocalFingerprint(),
+                        adapterBob.getLocalFingerprint(),
+                        false,
+                        SessionState.SECURE_READY,
+                        "",
+                        genA));
+        adapterAlice.dispatchSessionUpdate(
+                genA,
+                new SessionViewModel(
+                        sessionA.sessionId(),
+                        sessionA.remoteAddress(),
+                        adapterAlice.getLocalFingerprint(),
+                        "",
+                        false,
+                        SessionState.ERROR,
+                        "Stale error",
+                        genA));
+        adapterAlice.dispatchTransferUpdate(
+                genA,
+                new TransferViewModel(
+                        "tx-stale",
+                        "stale.bin",
+                        100L,
+                        50L,
+                        10.0,
+                        TransferViewModel.TransferDirection.UPLOAD,
+                        TransferState.TRANSFERRING,
+                        "",
+                        sessionA.sessionId(),
+                        genA));
+
+        javax.swing.SwingUtilities.invokeAndWait(() -> {});
+
+        assertEquals(
+                sessionCountBeforeStale,
+                receivedSessions.size(),
+                "Adapter phải bỏ qua toàn bộ session callback mang generation cũ");
+        assertEquals(
+                transferCountBeforeStale,
+                receivedTransfers.size(),
+                "Adapter phải bỏ qua toàn bộ transfer callback mang generation cũ");
     }
 
     private static String calculateSha256(Path file) throws Exception {

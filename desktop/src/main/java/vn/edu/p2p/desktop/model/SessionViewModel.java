@@ -4,6 +4,9 @@ package vn.edu.p2p.desktop.model;
  * ViewModel đại diện cho trạng thái của phiên kết nối mạng hiện hành.
  * Phản ánh chính xác kiến trúc bảo mật M2:
  * DISCONNECTED -> TCP_CONNECTED -> WAITING_FOR_FINGERPRINT -> TLS_HANDSHAKING -> SECURE_READY / ERROR.
+ *
+ * <p>Trường {@code sessionGeneration} là số thế hệ bất biến tăng đơn điệu cho mỗi phiên mới,
+ * dùng để phát hiện và loại bỏ callback đến muộn (stale callback) từ phiên cũ trên cả Adapter lẫn EDT.
  */
 public record SessionViewModel(
         String sessionId,
@@ -12,7 +15,27 @@ public record SessionViewModel(
         String expectedRemoteFingerprintRaw,
         boolean isRelay,
         SessionState state,
-        String errorMessage) {
+        String errorMessage,
+        long sessionGeneration) {
+
+    public SessionViewModel(
+            String sessionId,
+            String remoteAddress,
+            String localFingerprintRaw,
+            String expectedRemoteFingerprintRaw,
+            boolean isRelay,
+            SessionState state,
+            String errorMessage) {
+        this(
+                sessionId,
+                remoteAddress,
+                localFingerprintRaw,
+                expectedRemoteFingerprintRaw,
+                isRelay,
+                state,
+                errorMessage,
+                0L);
+    }
 
     public enum SessionState {
         DISCONNECTED("Chưa kết nối (DISCONNECTED)"),
@@ -35,14 +58,12 @@ public record SessionViewModel(
     }
 
     public static SessionViewModel createDisconnected() {
+        return createDisconnected(0L);
+    }
+
+    public static SessionViewModel createDisconnected(long sessionGeneration) {
         return new SessionViewModel(
-                "",
-                "",
-                "",
-                "",
-                false,
-                SessionState.DISCONNECTED,
-                "");
+                "", "", "", "", false, SessionState.DISCONNECTED, "", sessionGeneration);
     }
 
     public boolean isReadyToTransfer() {

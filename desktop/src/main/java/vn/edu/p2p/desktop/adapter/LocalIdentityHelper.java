@@ -2,6 +2,7 @@ package vn.edu.p2p.desktop.adapter;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -13,12 +14,16 @@ import java.nio.file.attribute.AclEntryFlag;
 import java.nio.file.attribute.AclEntryPermission;
 import java.nio.file.attribute.AclEntryType;
 import java.nio.file.attribute.AclFileAttributeView;
+import java.nio.file.attribute.FileAttribute;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.nio.file.attribute.UserPrincipal;
+import java.nio.file.attribute.UserPrincipalLookupService;
 import java.security.GeneralSecurityException;
 import java.security.SecureRandom;
+import java.util.ArrayDeque;
 import java.util.Arrays;
+import java.util.Deque;
 import java.util.EnumSet;
 import java.util.HexFormat;
 import java.util.List;
@@ -33,23 +38,37 @@ import vn.edu.p2p.core.PeerNode;
  * Tiện ích quản lý danh tính cục bộ PKCS12 (RSA 3072-bit, SHA256withRSA)
  * theo đúng chính sách bảo mật M2/M3 quy định tại docs/SECURITY.md.
  *
- * <p>Nguyên tắc bảo mật:
+ * <p>Nguyên tắc bảo mật (Fail-Closed):
  * <ul>
  *   <li>Keystore và tệp mật khẩu mặc định được lưu ngoài repository (AppData/XDG data).</li>
  *   <li>Không hardcode mật khẩu mặc định; không ghi mật khẩu ra log hoặc Preferences;
  *       không truyền mật khẩu qua tham số dòng lệnh.</li>
- *   <li>Chống symbolic-link attack và chống ghi đè tệp nhạy cảm bằng {@code NOFOLLOW_LINKS}
- *       và {@code CREATE_NEW}.</li>
- *   <li>Bắt buộc giới hạn quyền truy cập tệp nhạy cảm (POSIX {@code 0600} trên Linux,
- *       Windows ACL chỉ cho phép tài khoản hiện tại). Nếu không thể thiết lập quyền an toàn,
- *       phương thức sẽ ném {@link IOException} (fail-closed) thay vì tiếp tục không an toàn.</li>
+ *   <li>Kiểm tra toàn bộ thành phần đường dẫn cha, thư mục identity, keystore và tệp mật khẩu
+ *       để chặn symbolic-link attack và chống ghi đè tệp bí mật.</li>
+ *   <li>Xác minh chủ sở hữu và quyền truy cập của <b>thư mục identity</b> dù là thư mục mới tạo
+ *       hay đã tồn tại trước khi tạo tệp bí mật hoặc chạy {@code keytool}:
+ *       <ul>
+ *         <li>Linux/POSIX: chỉ chấp nhận thư mục {@code 0700} thuộc chủ sở hữu hiện tại;
+ *             từ chối world-writable ({@code 0777}) hoặc group-accessible.</li>
+ *         <li>Windows ACL: kiểm tra owner và mọi ACE hiệu lực (kể cả ACE kế thừa); từ chối
+ *             mọi quyền nhạy cảm cấp cho Everyone, Guests, Users, Authenticated Users hoặc
+ *             principal không tin cậy khác. Không tự động sửa ACL thư mục cũ không hợp lệ.</li>
+ *       </ul>
+ *   </li>
+ *   <li>Xác minh quyền tệp bí mật hiện có ({@code .p12}, {@code .pass}) trước khi nạp;
+ *       tạo tệp mới nguyên tử ({@code CREATE_NEW}) với quyền hạn chế ngay khi tạo.</li>
  * </ul>
  *
- * <p><b>Giới hạn bảo mật MVP:</b> Khi người dùng không cung cấp biến môi trường mật khẩu,
- * mật khẩu ngẫu nhiên 128-bit được lưu tại tệp {@code .pass} cục bộ được bảo vệ bởi quyền OS
- * (0600 / Windows ACL). Cơ chế quyền tệp hạn chế tài khoản OS khác trên cùng máy, nhưng
- * <i>không tương đương với mã hóa secret bằng OS credential manager</i> (Windows DPAPI/Credential
- * Manager hoặc Linux Secret Service).
+ * <p><b>Giới hạn bảo mật &amp; TOCTOU:</b>
+ * <ul>
+ *   <li>Quyền tệp OS ({@code 0600} / Windows ACL) bảo vệ tệp {@code .pass} khỏi tài khoản OS khác,
+ *       nhưng <i>không tương đương mã hóa secret bằng OS credential manager</i> (DPAPI / Secret Service).</li>
+ *   <li>Do {@code keytool} là tiến trình con nhận đường dẫn tệp thay vì file descriptor, vẫn tồn tại
+ *       cửa sổ TOCTOU hẹp nếu một tiến trình có đặc quyền cao hoặc cùng tài khoản thay đổi quyền
+ *       thư mục đúng thời điểm {@code keytool} chạy. Rủi ro này được giảm thiểu bằng việc xác minh
+ *       quyền thư mục trước khi gọi {@code keytool}, không theo symlink và kiểm tra/siết quyền ngay
+ *       sau khi {@code keytool} hoàn tất (xóa tệp tạo dở nếu kiểm tra thất bại).</li>
+ * </ul>
  */
 public final class LocalIdentityHelper {
 
@@ -57,13 +76,15 @@ public final class LocalIdentityHelper {
     private static final long MAX_PASS_FILE_BYTES = 4096L;
     private static final int KEYTOOL_TIMEOUT_SECONDS = 45;
     private static final Pattern SAFE_IDENTITY_NAME = Pattern.compile("^[a-zA-Z0-9._-]{1,64}$");
-    private static final Set<PosixFilePermission> OWNER_READ_WRITE =
+
+    static final Set<PosixFilePermission> OWNER_READ_WRITE =
             EnumSet.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE);
-    private static final Set<PosixFilePermission> OWNER_DIR_PERMS =
+    static final Set<PosixFilePermission> OWNER_DIR_PERMS =
             EnumSet.of(
                     PosixFilePermission.OWNER_READ,
                     PosixFilePermission.OWNER_WRITE,
                     PosixFilePermission.OWNER_EXECUTE);
+
     private static final Set<AclEntryPermission> WINDOWS_OWNER_FILE_PERMS =
             EnumSet.of(
                     AclEntryPermission.READ_DATA,
@@ -79,6 +100,8 @@ public final class LocalIdentityHelper {
                     AclEntryPermission.SYNCHRONIZE);
     private static final Set<AclEntryPermission> WINDOWS_OWNER_DIR_PERMS =
             EnumSet.allOf(AclEntryPermission.class);
+    private static final Set<AclEntryPermission> SENSITIVE_ACL_PERMISSIONS =
+            EnumSet.complementOf(EnumSet.of(AclEntryPermission.SYNCHRONIZE));
 
     static final PermissionEnforcer DEFAULT_PERMISSION_ENFORCER = new OsPermissionEnforcer();
     static final KeytoolRunner DEFAULT_KEYTOOL_RUNNER =
@@ -91,6 +114,10 @@ public final class LocalIdentityHelper {
         void restrictFile(Path file) throws IOException;
 
         void restrictDirectory(Path directory) throws IOException;
+
+        void verifyExistingFile(Path file) throws IOException;
+
+        void verifyExistingDirectory(Path directory) throws IOException;
     }
 
     interface KeytoolRunner {
@@ -98,30 +125,31 @@ public final class LocalIdentityHelper {
     }
 
     /**
-     * Nạp danh tính cục bộ từ đường dẫn và mật khẩu được chỉ định.
+     * Nạp danh tính cục bộ từ đường dẫn và mật khẩu được chỉ định sau khi xác minh đường dẫn an toàn.
      */
     public static PeerNode load(Path storePath, char[] password, String alias)
             throws IOException, GeneralSecurityException {
         Objects.requireNonNull(storePath, "Đường dẫn keystore không được null");
         Objects.requireNonNull(password, "Mật khẩu keystore không được null");
-        ensureNotSymlink(storePath, "tệp danh tính");
-        if (!Files.exists(storePath, LinkOption.NOFOLLOW_LINKS)) {
-            throw new IOException("Tệp danh tính không tồn tại: " + storePath);
+        Path normalized = storePath.toAbsolutePath().normalize();
+        ensureNoSymlinkInPath(normalized, "tệp danh tính");
+        if (!Files.exists(normalized, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("Tệp danh tính không tồn tại: " + normalized);
         }
-        if (!Files.isRegularFile(storePath, LinkOption.NOFOLLOW_LINKS)) {
-            throw new IOException("Đường dẫn danh tính không phải tệp thường: " + storePath);
+        if (!Files.isRegularFile(normalized, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("Đường dẫn danh tính không phải tệp thường: " + normalized);
         }
+        Path parentDir = normalized.getParent();
+        if (parentDir != null) {
+            DEFAULT_PERMISSION_ENFORCER.verifyExistingDirectory(parentDir);
+        }
+        DEFAULT_PERMISSION_ENFORCER.verifyExistingFile(normalized);
         return PeerNode.loadIdentity(
-                storePath, password, (alias != null && !alias.isBlank()) ? alias : DEFAULT_ALIAS);
+                normalized, password, (alias != null && !alias.isBlank()) ? alias : DEFAULT_ALIAS);
     }
 
     /**
      * Nạp danh tính mặc định hoặc tự động sinh danh tính mới nếu chưa tồn tại.
-     * Thứ tự ưu tiên xác định đường dẫn (mặc định luôn nằm ngoài repository):
-     * 1. System property: -Dp2p.identity.store=/path/to/identity.p12
-     * 2. Environment variable: P2P_IDENTITY_STORE
-     * 3. Mặc định: %LOCALAPPDATA%/P2pFileTransfer/&lt;name&gt;.p12 (Windows)
-     *    hoặc ~/.local/share/p2p-file-transfer/&lt;name&gt;.p12 (Linux)
      */
     public static PeerNode getOrCreateDefaultIdentity() throws IOException, GeneralSecurityException {
         Path storePath = resolveDefaultStorePath();
@@ -148,11 +176,13 @@ public final class LocalIdentityHelper {
         if (parentDir == null) {
             throw new IOException("Đường dẫn keystore không có thư mục cha hợp lệ: " + normalizedStore);
         }
-        ensureNotSymlink(parentDir, "thư mục chứa danh tính");
-        ensureNotSymlink(normalizedStore, "tệp keystore");
+        ensureNoSymlinkInPath(normalizedStore, "tệp keystore");
 
         Path passFile = resolvePasswordFile(normalizedStore);
-        ensureNotSymlink(passFile, "tệp mật khẩu cục bộ");
+        ensureNoSymlinkInPath(passFile, "tệp mật khẩu cục bộ");
+
+        // Luôn xác minh an toàn thư mục identity (mới hoặc đã tồn tại) TRƯỚC mọi thao tác đọc/ghi bí mật
+        prepareOrVerifySecureDirectory(parentDir, permissionEnforcer);
 
         boolean storeExists = Files.exists(normalizedStore, LinkOption.NOFOLLOW_LINKS);
         if (storeExists && !Files.isRegularFile(normalizedStore, LinkOption.NOFOLLOW_LINKS)) {
@@ -163,11 +193,10 @@ public final class LocalIdentityHelper {
         if (envPassword != null) {
             try {
                 if (!storeExists) {
-                    prepareSecureParentDirectory(parentDir, permissionEnforcer);
                     generateAndRestrictKeystore(
                             normalizedStore, envPassword, DEFAULT_ALIAS, permissionEnforcer, keytoolRunner);
                 } else {
-                    permissionEnforcer.restrictFile(normalizedStore);
+                    permissionEnforcer.verifyExistingFile(normalizedStore);
                 }
                 return PeerNode.loadIdentity(normalizedStore, envPassword, DEFAULT_ALIAS);
             } finally {
@@ -182,7 +211,7 @@ public final class LocalIdentityHelper {
                         "Tệp keystore đã tồn tại nhưng không tìm thấy tệp mật khẩu cục bộ tương ứng"
                                 + " (hoặc biến môi trường P2P_IDENTITY_PASSWORD / P2P_PASSWORD_ENV).");
             }
-            permissionEnforcer.restrictFile(normalizedStore);
+            permissionEnforcer.verifyExistingFile(normalizedStore);
             char[] existingPassword = readSecurePasswordFile(passFile, permissionEnforcer);
             try {
                 return PeerNode.loadIdentity(normalizedStore, existingPassword, DEFAULT_ALIAS);
@@ -197,7 +226,6 @@ public final class LocalIdentityHelper {
                             + passFile);
         }
 
-        prepareSecureParentDirectory(parentDir, permissionEnforcer);
         char[] generatedPassword = generateRandomPasswordChars();
         boolean passFileCreated = false;
         try {
@@ -209,7 +237,9 @@ public final class LocalIdentityHelper {
         } catch (IOException | GeneralSecurityException | RuntimeException e) {
             if (passFileCreated && !Files.exists(normalizedStore, LinkOption.NOFOLLOW_LINKS)) {
                 try {
-                    Files.deleteIfExists(passFile);
+                    if (!Files.isSymbolicLink(passFile)) {
+                        Files.deleteIfExists(passFile);
+                    }
                 } catch (IOException cleanupError) {
                     e.addSuppressed(cleanupError);
                 }
@@ -285,6 +315,10 @@ public final class LocalIdentityHelper {
         DEFAULT_PERMISSION_ENFORCER.restrictFile(file);
     }
 
+    public static void restrictDirectoryToCurrentUser(Path directory) throws IOException {
+        DEFAULT_PERMISSION_ENFORCER.restrictDirectory(directory);
+    }
+
     static void generateAndRestrictKeystore(
             Path storePath,
             char[] password,
@@ -297,23 +331,25 @@ public final class LocalIdentityHelper {
         if (password.length < 6) {
             throw new IOException("Mật khẩu keystore phải có tối thiểu 6 ký tự.");
         }
-        ensureNotSymlink(storePath, "tệp keystore");
+        ensureNoSymlinkInPath(storePath, "tệp keystore");
         if (Files.exists(storePath, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("Tệp keystore đã tồn tại; từ chối ghi đè: " + storePath);
         }
         Path parentDir = storePath.getParent();
-        if (parentDir != null) {
-            ensureNotSymlink(parentDir, "thư mục chứa keystore");
-            prepareSecureParentDirectory(parentDir, permissionEnforcer);
+        if (parentDir == null) {
+            throw new IOException("Đường dẫn keystore không có thư mục cha hợp lệ: " + storePath);
         }
+        // Xác minh/chuẩn bị thư mục an toàn TRƯỚC KHI keytool ghi keystore
+        prepareOrVerifySecureDirectory(parentDir, permissionEnforcer);
 
         try {
             keytoolRunner.generate(storePath, password, alias);
-            ensureNotSymlink(storePath, "tệp keystore vừa tạo");
+            ensureNoSymlinkInPath(storePath, "tệp keystore vừa tạo");
             if (!Files.isRegularFile(storePath, LinkOption.NOFOLLOW_LINKS)) {
                 throw new IOException("Keytool không tạo ra tệp keystore hợp lệ tại: " + storePath);
             }
             permissionEnforcer.restrictFile(storePath);
+            permissionEnforcer.verifyExistingFile(storePath);
         } catch (IOException | RuntimeException e) {
             try {
                 if (!Files.isSymbolicLink(storePath)) {
@@ -462,7 +498,7 @@ public final class LocalIdentityHelper {
 
     private static char[] readSecurePasswordFile(Path passFile, PermissionEnforcer permissionEnforcer)
             throws IOException {
-        ensureNotSymlink(passFile, "tệp mật khẩu cục bộ");
+        ensureNoSymlinkInPath(passFile, "tệp mật khẩu cục bộ");
         if (!Files.isRegularFile(passFile, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("Tệp mật khẩu cục bộ không phải tệp thường: " + passFile);
         }
@@ -470,7 +506,7 @@ public final class LocalIdentityHelper {
         if (size <= 0 || size > MAX_PASS_FILE_BYTES) {
             throw new IOException("Kích thước tệp mật khẩu cục bộ không hợp lệ.");
         }
-        permissionEnforcer.restrictFile(passFile);
+        permissionEnforcer.verifyExistingFile(passFile);
 
         byte[] raw = Files.readAllBytes(passFile);
         try {
@@ -486,21 +522,26 @@ public final class LocalIdentityHelper {
 
     private static void writeSecureNewPasswordFile(
             Path passFile, char[] password, PermissionEnforcer permissionEnforcer) throws IOException {
-        ensureNotSymlink(passFile, "tệp mật khẩu cục bộ");
+        ensureNoSymlinkInPath(passFile, "tệp mật khẩu cục bộ");
         if (Files.exists(passFile, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("Tệp mật khẩu cục bộ đã tồn tại; từ chối ghi đè: " + passFile);
         }
 
-        boolean posixSupported =
-                passFile.getFileSystem().supportedFileAttributeViews().contains("posix");
-        if (posixSupported) {
+        Set<String> views = passFile.getFileSystem().supportedFileAttributeViews();
+        if (views.contains("posix")) {
             Files.createFile(passFile, PosixFilePermissions.asFileAttribute(OWNER_READ_WRITE));
+        } else if (views.contains("acl")) {
+            UserPrincipal owner = lookupCurrentUserPrincipal(passFile);
+            if (owner != null) {
+                Files.createFile(passFile, buildWindowsOwnerAclAttribute(owner, false));
+            } else {
+                Files.createFile(passFile);
+            }
         } else {
-            // Tạo tệp rỗng nguyên tử (CREATE_NEW) rồi giới hạn ACL trước khi ghi byte mật khẩu
             Files.createFile(passFile);
         }
 
-        ByteBuffer encoded = StandardCharsets.UTF_8.encode(java.nio.CharBuffer.wrap(password));
+        ByteBuffer encoded = StandardCharsets.UTF_8.encode(CharBuffer.wrap(password));
         byte[] exactBytes = new byte[encoded.remaining()];
         encoded.get(exactBytes);
         if (encoded.hasArray()) {
@@ -509,6 +550,7 @@ public final class LocalIdentityHelper {
 
         try {
             permissionEnforcer.restrictFile(passFile);
+            permissionEnforcer.verifyExistingFile(passFile);
             try (FileChannel channel =
                     FileChannel.open(
                             passFile,
@@ -535,21 +577,255 @@ public final class LocalIdentityHelper {
         }
     }
 
-    private static void prepareSecureParentDirectory(
+    /**
+     * Chuẩn bị thư mục identity mới (với quyền riêng tư) hoặc xác minh nghiêm ngặt thư mục đã tồn tại.
+     * Tuyệt đối KHÔNG tự động sửa ACL/chmod của thư mục cũ không hợp lệ (fail-closed).
+     */
+    private static void prepareOrVerifySecureDirectory(
             Path parentDir, PermissionEnforcer permissionEnforcer) throws IOException {
-        ensureNotSymlink(parentDir, "thư mục chứa danh tính");
-        boolean existedBefore = Files.exists(parentDir, LinkOption.NOFOLLOW_LINKS);
-        if (!existedBefore) {
-            Files.createDirectories(parentDir);
-            permissionEnforcer.restrictDirectory(parentDir);
-        } else if (!Files.isDirectory(parentDir, LinkOption.NOFOLLOW_LINKS)) {
-            throw new IOException("Đường dẫn cha không phải thư mục hợp lệ: " + parentDir);
+        ensureNoSymlinkInPath(parentDir, "thư mục chứa danh tính");
+
+        if (Files.exists(parentDir, LinkOption.NOFOLLOW_LINKS)) {
+            if (!Files.isDirectory(parentDir, LinkOption.NOFOLLOW_LINKS)) {
+                throw new IOException("Đường dẫn cha không phải thư mục hợp lệ: " + parentDir);
+            }
+            permissionEnforcer.verifyExistingDirectory(parentDir);
+            return;
+        }
+
+        // Tạo lần lượt các thư mục chưa tồn tại; thư mục identity đích được tạo với quyền riêng tư
+        Deque<Path> missingDirs = new ArrayDeque<>();
+        Path cursor = parentDir;
+        while (cursor != null && !Files.exists(cursor, LinkOption.NOFOLLOW_LINKS)) {
+            missingDirs.push(cursor);
+            cursor = cursor.getParent();
+        }
+        if (cursor != null) {
+            ensureNoSymlinkInPath(cursor, "thư mục gốc của danh tính");
+            if (!Files.isDirectory(cursor, LinkOption.NOFOLLOW_LINKS)) {
+                throw new IOException("Thành phần cha không phải thư mục hợp lệ: " + cursor);
+            }
+        }
+
+        Set<String> views = parentDir.getFileSystem().supportedFileAttributeViews();
+        while (!missingDirs.isEmpty()) {
+            Path dirToCreate = missingDirs.pop();
+            boolean isTargetDir = dirToCreate.equals(parentDir);
+            if (isTargetDir && views.contains("posix")) {
+                Files.createDirectory(dirToCreate, PosixFilePermissions.asFileAttribute(OWNER_DIR_PERMS));
+            } else if (isTargetDir && views.contains("acl")) {
+                UserPrincipal owner = lookupCurrentUserPrincipal(dirToCreate);
+                if (owner != null) {
+                    Files.createDirectory(dirToCreate, buildWindowsOwnerAclAttribute(owner, true));
+                } else {
+                    Files.createDirectory(dirToCreate);
+                }
+            } else {
+                Files.createDirectory(dirToCreate);
+            }
+            if (isTargetDir) {
+                permissionEnforcer.restrictDirectory(dirToCreate);
+                permissionEnforcer.verifyExistingDirectory(dirToCreate);
+            }
         }
     }
 
-    private static void ensureNotSymlink(Path path, String label) throws IOException {
-        if (Files.isSymbolicLink(path)) {
-            throw new IOException("Từ chối truy cập symbolic link cho " + label + ": " + path);
+    /**
+     * Kiểm tra toàn bộ các thành phần đường dẫn đang tồn tại từ gốc đến {@code path}
+     * để bảo đảm không có symbolic link nào nằm trên đường dẫn nhạy cảm.
+     */
+    static void ensureNoSymlinkInPath(Path path, String label) throws IOException {
+        Path normalized = path.toAbsolutePath().normalize();
+        Path current = normalized.getRoot();
+        for (Path part : normalized) {
+            current = (current == null) ? part : current.resolve(part);
+            if (Files.exists(current, LinkOption.NOFOLLOW_LINKS) && Files.isSymbolicLink(current)) {
+                throw new IOException(
+                        "Từ chối truy cập đường dẫn đi qua symbolic link (" + label + "): " + current);
+            }
+        }
+    }
+
+    private static FileAttribute<List<AclEntry>> buildWindowsOwnerAclAttribute(
+            UserPrincipal owner, boolean isDirectory) {
+        AclEntry.Builder builder =
+                AclEntry.newBuilder()
+                        .setType(AclEntryType.ALLOW)
+                        .setPrincipal(owner)
+                        .setPermissions(isDirectory ? WINDOWS_OWNER_DIR_PERMS : WINDOWS_OWNER_FILE_PERMS);
+        if (isDirectory) {
+            builder.setFlags(AclEntryFlag.FILE_INHERIT, AclEntryFlag.DIRECTORY_INHERIT);
+        }
+        List<AclEntry> acl = List.of(builder.build());
+        return new FileAttribute<>() {
+            @Override
+            public String name() {
+                return "acl:acl";
+            }
+
+            @Override
+            public List<AclEntry> value() {
+                return acl;
+            }
+        };
+    }
+
+    private static UserPrincipal lookupCurrentUserPrincipal(Path path) {
+        String userName = System.getProperty("user.name");
+        if (userName == null || userName.isBlank()) {
+            return null;
+        }
+        try {
+            return path.getFileSystem()
+                    .getUserPrincipalLookupService()
+                    .lookupPrincipalByName(userName);
+        } catch (IOException | UnsupportedOperationException ignored) {
+            return null;
+        }
+    }
+
+    private static UserPrincipal lookupPrincipalQuietly(
+            UserPrincipalLookupService lookup, String name) {
+        try {
+            return lookup.lookupPrincipalByName(name);
+        } catch (IOException | UnsupportedOperationException ignored) {
+            return null;
+        }
+    }
+
+    static void validatePosixDirectoryPermissions(
+            Path directory,
+            UserPrincipal actualOwner,
+            UserPrincipal expectedOwner,
+            Set<PosixFilePermission> permissions)
+            throws IOException {
+        if (expectedOwner == null || !expectedOwner.equals(actualOwner)) {
+            throw new IOException(
+                    "Thư mục danh tính không thuộc tài khoản hiện tại (owner="
+                            + actualOwner
+                            + ", expected="
+                            + expectedOwner
+                            + "): "
+                            + directory);
+        }
+        if (permissions == null || !OWNER_DIR_PERMS.equals(permissions)) {
+            String permStr =
+                    (permissions == null) ? "null" : PosixFilePermissions.toString(permissions);
+            throw new IOException(
+                    "Thư mục danh tính có quyền POSIX không an toàn (yêu cầu 0700 / rwx------, hiện tại: "
+                            + permStr
+                            + "): "
+                            + directory);
+        }
+    }
+
+    static void validatePosixFilePermissions(
+            Path file,
+            UserPrincipal actualOwner,
+            UserPrincipal expectedOwner,
+            Set<PosixFilePermission> permissions)
+            throws IOException {
+        if (expectedOwner == null || !expectedOwner.equals(actualOwner)) {
+            throw new IOException(
+                    "Tệp bí mật không thuộc tài khoản hiện tại (owner="
+                            + actualOwner
+                            + ", expected="
+                            + expectedOwner
+                            + "): "
+                            + file);
+        }
+        if (permissions == null
+                || !permissions.contains(PosixFilePermission.OWNER_READ)
+                || !OWNER_READ_WRITE.containsAll(permissions)) {
+            String permStr =
+                    (permissions == null) ? "null" : PosixFilePermissions.toString(permissions);
+            throw new IOException(
+                    "Tệp bí mật có quyền POSIX không an toàn (yêu cầu 0600 / rw-------, hiện tại: "
+                            + permStr
+                            + "): "
+                            + file);
+        }
+    }
+
+    static void validateWindowsAcl(
+            Path path,
+            boolean isDirectory,
+            UserPrincipal actualOwner,
+            UserPrincipal currentUser,
+            UserPrincipal systemPrincipal,
+            UserPrincipal adminsPrincipal,
+            UserPrincipal creatorOwnerPrincipal,
+            List<AclEntry> acl)
+            throws IOException {
+        String targetType = isDirectory ? "Thư mục danh tính" : "Tệp bí mật";
+        if (actualOwner == null) {
+            throw new IOException(targetType + " không có thông tin chủ sở hữu ACL hợp lệ: " + path);
+        }
+        boolean ownerValid =
+                (currentUser != null && currentUser.equals(actualOwner))
+                        || (adminsPrincipal != null && adminsPrincipal.equals(actualOwner));
+        if (!ownerValid) {
+            throw new IOException(
+                    targetType
+                            + " không thuộc quyền sở hữu tài khoản hiện tại (owner="
+                            + actualOwner.getName()
+                            + "): "
+                            + path);
+        }
+
+        if (acl == null || acl.isEmpty()) {
+            throw new IOException(targetType + " có danh sách Windows ACL rỗng hoặc không hợp lệ: " + path);
+        }
+
+        boolean currentUserHasAccess = false;
+        for (AclEntry entry : acl) {
+            if (entry.type() != AclEntryType.ALLOW) {
+                continue;
+            }
+            Set<AclEntryPermission> perms = entry.permissions();
+            boolean grantsSensitive = false;
+            for (AclEntryPermission perm : perms) {
+                if (SENSITIVE_ACL_PERMISSIONS.contains(perm)) {
+                    grantsSensitive = true;
+                    break;
+                }
+            }
+            if (!grantsSensitive) {
+                continue;
+            }
+
+            UserPrincipal principal = entry.principal();
+            if (currentUser != null && currentUser.equals(principal)) {
+                currentUserHasAccess = true;
+                continue;
+            }
+            if (systemPrincipal != null && systemPrincipal.equals(principal)) {
+                continue;
+            }
+            if (adminsPrincipal != null && adminsPrincipal.equals(principal)) {
+                if (adminsPrincipal.equals(actualOwner)) {
+                    currentUserHasAccess = true;
+                }
+                continue;
+            }
+            if (isDirectory
+                    && creatorOwnerPrincipal != null
+                    && creatorOwnerPrincipal.equals(principal)
+                    && entry.flags().contains(AclEntryFlag.INHERIT_ONLY)) {
+                continue;
+            }
+
+            throw new IOException(
+                    targetType
+                            + " có quyền Windows ACL không an toàn cho đối tượng không tin cậy ("
+                            + (principal != null ? principal.getName() : "unknown")
+                            + "): "
+                            + path);
+        }
+
+        if (!currentUserHasAccess) {
+            throw new IOException(
+                    targetType + " không cấp quyền truy cập hợp lệ cho tài khoản hiện tại: " + path);
         }
     }
 
@@ -557,7 +833,7 @@ public final class LocalIdentityHelper {
 
         @Override
         public void restrictFile(Path file) throws IOException {
-            ensureNotSymlink(file, "tệp nhạy cảm");
+            ensureNoSymlinkInPath(file, "tệp nhạy cảm");
             if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
                 throw new IOException("Không thể đặt quyền cho đường dẫn không phải tệp thường: " + file);
             }
@@ -565,19 +841,14 @@ public final class LocalIdentityHelper {
             Set<String> views = file.getFileSystem().supportedFileAttributeViews();
             if (views.contains("posix")) {
                 Files.setPosixFilePermissions(file, OWNER_READ_WRITE);
-                Set<PosixFilePermission> actual =
-                        Files.getPosixFilePermissions(file, LinkOption.NOFOLLOW_LINKS);
-                if (!OWNER_READ_WRITE.equals(actual)) {
-                    throw new IOException(
-                            "Không thể xác nhận quyền POSIX 0600 cho tệp nhạy cảm: " + file);
-                }
+                verifyExistingFile(file);
                 return;
             }
 
             AclFileAttributeView aclView =
                     Files.getFileAttributeView(file, AclFileAttributeView.class, LinkOption.NOFOLLOW_LINKS);
             if (aclView != null) {
-                UserPrincipal owner = resolveCurrentUserPrincipal(file, aclView);
+                UserPrincipal owner = resolveCurrentUserForWrite(file, aclView);
                 AclEntry ownerEntry =
                         AclEntry.newBuilder()
                                 .setType(AclEntryType.ALLOW)
@@ -601,7 +872,7 @@ public final class LocalIdentityHelper {
 
         @Override
         public void restrictDirectory(Path directory) throws IOException {
-            ensureNotSymlink(directory, "thư mục nhạy cảm");
+            ensureNoSymlinkInPath(directory, "thư mục nhạy cảm");
             if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) {
                 throw new IOException("Không phải thư mục hợp lệ: " + directory);
             }
@@ -609,11 +880,7 @@ public final class LocalIdentityHelper {
             Set<String> views = directory.getFileSystem().supportedFileAttributeViews();
             if (views.contains("posix")) {
                 Files.setPosixFilePermissions(directory, OWNER_DIR_PERMS);
-                Set<PosixFilePermission> actual =
-                        Files.getPosixFilePermissions(directory, LinkOption.NOFOLLOW_LINKS);
-                if (!OWNER_DIR_PERMS.equals(actual)) {
-                    throw new IOException("Không thể xác nhận quyền POSIX 0700 cho thư mục: " + directory);
-                }
+                verifyExistingDirectory(directory);
                 return;
             }
 
@@ -621,7 +888,7 @@ public final class LocalIdentityHelper {
                     Files.getFileAttributeView(
                             directory, AclFileAttributeView.class, LinkOption.NOFOLLOW_LINKS);
             if (aclView != null) {
-                UserPrincipal owner = resolveCurrentUserPrincipal(directory, aclView);
+                UserPrincipal owner = resolveCurrentUserForWrite(directory, aclView);
                 AclEntry ownerEntry =
                         AclEntry.newBuilder()
                                 .setType(AclEntryType.ALLOW)
@@ -630,6 +897,13 @@ public final class LocalIdentityHelper {
                                 .setPermissions(WINDOWS_OWNER_DIR_PERMS)
                                 .build();
                 aclView.setAcl(List.of(ownerEntry));
+
+                List<AclEntry> applied = aclView.getAcl();
+                if (applied.isEmpty() || !applied.stream().allMatch(e -> owner.equals(e.principal()))) {
+                    throw new IOException(
+                            "Không thể xác nhận giới hạn Windows ACL chỉ cho tài khoản hiện tại trên thư mục: "
+                                    + directory);
+                }
                 return;
             }
 
@@ -638,21 +912,71 @@ public final class LocalIdentityHelper {
                             + directory);
         }
 
-        private static UserPrincipal resolveCurrentUserPrincipal(
-                Path path, AclFileAttributeView aclView) throws IOException {
-            String userName = System.getProperty("user.name");
-            if (userName != null && !userName.isBlank()) {
-                try {
-                    UserPrincipal principal =
-                            path.getFileSystem()
-                                    .getUserPrincipalLookupService()
-                                    .lookupPrincipalByName(userName);
-                    if (principal != null) {
-                        return principal;
-                    }
-                } catch (IOException ignored) {
-                    // Fallback về owner hiện tại của tệp nếu lookup theo tên rút gọn không khớp
+        @Override
+        public void verifyExistingFile(Path file) throws IOException {
+            ensureNoSymlinkInPath(file, "tệp bí mật");
+            if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
+                throw new IOException("Tệp bí mật không phải tệp thường: " + file);
+            }
+            verifyPathSecurity(file, false);
+        }
+
+        @Override
+        public void verifyExistingDirectory(Path directory) throws IOException {
+            ensureNoSymlinkInPath(directory, "thư mục danh tính");
+            if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) {
+                throw new IOException("Đường dẫn danh tính không phải thư mục hợp lệ: " + directory);
+            }
+            verifyPathSecurity(directory, true);
+        }
+
+        private static void verifyPathSecurity(Path path, boolean isDirectory) throws IOException {
+            Set<String> views = path.getFileSystem().supportedFileAttributeViews();
+            if (views.contains("posix")) {
+                UserPrincipal actualOwner = Files.getOwner(path, LinkOption.NOFOLLOW_LINKS);
+                UserPrincipal expectedOwner = lookupCurrentUserPrincipal(path);
+                Set<PosixFilePermission> perms =
+                        Files.getPosixFilePermissions(path, LinkOption.NOFOLLOW_LINKS);
+                if (isDirectory) {
+                    validatePosixDirectoryPermissions(path, actualOwner, expectedOwner, perms);
+                } else {
+                    validatePosixFilePermissions(path, actualOwner, expectedOwner, perms);
                 }
+                return;
+            }
+
+            AclFileAttributeView aclView =
+                    Files.getFileAttributeView(path, AclFileAttributeView.class, LinkOption.NOFOLLOW_LINKS);
+            if (aclView != null) {
+                UserPrincipalLookupService lookup = path.getFileSystem().getUserPrincipalLookupService();
+                UserPrincipal currentUser = lookupCurrentUserPrincipal(path);
+                UserPrincipal systemPrincipal = lookupPrincipalQuietly(lookup, "NT AUTHORITY\\SYSTEM");
+                UserPrincipal adminsPrincipal = lookupPrincipalQuietly(lookup, "BUILTIN\\Administrators");
+                UserPrincipal creatorOwnerPrincipal = lookupPrincipalQuietly(lookup, "CREATOR OWNER");
+                UserPrincipal actualOwner = aclView.getOwner();
+                List<AclEntry> acl = aclView.getAcl();
+
+                validateWindowsAcl(
+                        path,
+                        isDirectory,
+                        actualOwner,
+                        currentUser,
+                        systemPrincipal,
+                        adminsPrincipal,
+                        creatorOwnerPrincipal,
+                        acl);
+                return;
+            }
+
+            throw new IOException(
+                    "Hệ thống tệp không hỗ trợ kiểm tra quyền truy cập an toàn (POSIX/ACL) cho: " + path);
+        }
+
+        private static UserPrincipal resolveCurrentUserForWrite(
+                Path path, AclFileAttributeView aclView) throws IOException {
+            UserPrincipal currentUser = lookupCurrentUserPrincipal(path);
+            if (currentUser != null) {
+                return currentUser;
             }
             UserPrincipal owner = aclView.getOwner();
             if (owner == null) {

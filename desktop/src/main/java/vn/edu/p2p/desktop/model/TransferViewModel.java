@@ -5,6 +5,9 @@ import vn.edu.p2p.desktop.util.Formatters;
 /**
  * ViewModel đại diện cho trạng thái hiển thị của một tác vụ truyền tải tệp tin.
  * Khớp với vòng đời truyền file: IDLE -> OFFERED -> TRANSFERRING -> VERIFYING_FILE -> COMPLETED.
+ *
+ * <p>Mang theo {@code sessionId} và {@code sessionGeneration} của phiên sở hữu tác vụ
+ * để loại bỏ các callback transfer/offer/cancel đến muộn từ phiên cũ.
  */
 public record TransferViewModel(
         String transferId,
@@ -14,7 +17,31 @@ public record TransferViewModel(
         double speedBytesPerSec,
         TransferDirection direction,
         TransferState state,
-        String errorMessage) {
+        String errorMessage,
+        String sessionId,
+        long sessionGeneration) {
+
+    public TransferViewModel(
+            String transferId,
+            String fileName,
+            long totalBytes,
+            long bytesTransferred,
+            double speedBytesPerSec,
+            TransferDirection direction,
+            TransferState state,
+            String errorMessage) {
+        this(
+                transferId,
+                fileName,
+                totalBytes,
+                bytesTransferred,
+                speedBytesPerSec,
+                direction,
+                state,
+                errorMessage,
+                "",
+                0L);
+    }
 
     public enum TransferDirection {
         UPLOAD("Gửi đi (Upload)"),
@@ -56,6 +83,10 @@ public record TransferViewModel(
     }
 
     public static TransferViewModel createIdle() {
+        return createIdle(0L);
+    }
+
+    public static TransferViewModel createIdle(long sessionGeneration) {
         return new TransferViewModel(
                 "",
                 "(Chưa có tệp tin đang truyền)",
@@ -64,7 +95,9 @@ public record TransferViewModel(
                 0.0,
                 TransferDirection.UPLOAD,
                 TransferState.IDLE,
-                "");
+                "",
+                "",
+                sessionGeneration);
     }
 
     public int getProgressPercentage() {
