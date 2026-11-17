@@ -2,7 +2,9 @@
 
 Đồ án 4: ứng dụng truyền tệp ngang hàng đa nền tảng, mã hóa đầu cuối bằng TLS 1.3 giữa hai peer. Java 21, Gradle multi-module; desktop dự kiến dùng Swing + FlatLaf. Repository chính thức: [Hermess1309/doan4](https://github.com/Hermess1309/doan4).
 
-**Trạng thái M0:** chỉ có khung build, tài liệu, 6 module và smoke test. Chưa có kết nối mạng, TLS, truyền file, relay hoạt động hoặc UI. Không dùng scaffold này để truyền dữ liệu thật.
+**Trạng thái M6-MVP:** core/CLI truyền file qua TCP relay với mutual TLS 1.3 đầu cuối, independent fingerprint pinning, SHA-256 và no-overwrite. Có pairing expiry/limits và tests localhost; chưa nghiệm thu public Internet/hai OS thật, chưa resume hoặc UI tích hợp. [Relay demo và giới hạn](docs/RELAY.md). [Demo hai peer](docs/DEMO.md), [API core](docs/CORE_API.md), [bảo mật/identity](docs/SECURITY.md).
+
+Nền tảng mục tiêu MVP: Windows 10/11 và Ubuntu Linux. macOS không bắt buộc; CI không thay kiểm thử truyền file thật giữa hai máy hoặc GUI Ubuntu. Demo relay khác mạng vẫn cần nghiệm thu trên public server.
 
 ## Chuẩn bị
 
@@ -19,7 +21,7 @@ java -version
 .\gradlew.bat :cli:run :desktop:run
 ```
 
-## Build và chạy trên Linux/macOS
+## Build và chạy trên Ubuntu Linux
 
 ```sh
 java -version
@@ -29,9 +31,9 @@ chmod +x gradlew
 ./gradlew :cli:run :desktop:run
 ```
 
-Hai lệnh `run` chỉ in thông báo M0 rồi thoát, không mở cửa sổ hay socket. Relay chưa có entry point. `build` chạy test và Spotless ở cả 6 module; `:core:test` chạy riêng test core. `spotlessApply` sửa khoảng trắng, tab, thứ tự import và newline Java; M0 chưa dùng formatter Java bên ngoài.
+Lệnh cli:run không có args hiển thị help; desktop:run vẫn là placeholder M0 trong branch Codex. Demo tương tác dùng cli:installDist và launcher như DEMO.md, không dùng Gradle run để nhập password. Relay dùng CLI relay-server/relay-receive/relay-send (RELAY.md). `build` chạy test và Spotless ở cả 6 module; `:core:test` chạy riêng test core. `spotlessApply` sửa khoảng trắng, tab, thứ tự import và newline Java; M0 chưa dùng formatter Java bên ngoài.
 
-Báo cáo test tại `<module>/build/reports/tests/test/index.html`, XML tại `<module>/build/test-results/test/`. CI cấu hình Ubuntu, Windows, macOS với JDK 21 và lưu test report; trạng thái thực thi ghi trong [TASKS](docs/TASKS.md).
+Báo cáo test tại `<module>/build/reports/tests/test/index.html`, XML tại `<module>/build/test-results/test/`. CI cấu hình ubuntu-latest và windows-latest với JDK 21 và lưu test report; trạng thái thực thi ghi trong [TASKS](docs/TASKS.md).
 
 ## Cấu trúc và dependency
 
