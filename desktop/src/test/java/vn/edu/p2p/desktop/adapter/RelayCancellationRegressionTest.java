@@ -414,6 +414,345 @@ class RelayCancellationRegressionTest {
         }
     }
 
+    @Test
+    void testCreateHandoffRaceCancelAfterTicketInstalledBeforeFutureComplete() throws Exception {
+        List<SessionViewModel> events = new CopyOnWriteArrayList<>();
+        receiverAdapter.registerListeners(events::add, null);
+
+        CountDownLatch installedLatch = new CountDownLatch(1);
+        CountDownLatch releaseCommitLatch = new CountDownLatch(1);
+        receiverAdapter.setOnAfterOperationInstalledForTest(
+                () -> {
+                    installedLatch.countDown();
+                    try {
+                        releaseCommitLatch.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+
+        try (ServerSocket controlledServer =
+                new ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"))) {
+            CompletableFuture<Socket> acceptedRef = acceptAsync(controlledServer);
+            CompletableFuture<RelayTicketInfo> createFuture =
+                    receiverAdapter.createRelaySession("127.0.0.1", controlledServer.getLocalPort());
+
+            try (Socket serverSock = acceptedRef.get(5, TimeUnit.SECONDS)) {
+                assertEquals(5, serverSock.getInputStream().readNBytes(5).length);
+
+                // Trả lời CREATED hợp lệ để adapter cài đặt Pending ticket vào trạng thái INSTALLED
+                DataOutputStream out = new DataOutputStream(serverSock.getOutputStream());
+                out.writeInt(RELAY_MAGIC);
+                out.writeByte(RELAY_STATUS_CREATED);
+                out.write("ABCDEFGH2345".getBytes(StandardCharsets.US_ASCII));
+                out.writeInt(60_000);
+                out.flush();
+
+                // Đợi đúng điểm Pending đã INSTALLED nhưng createFuture chưa complete()
+                assertTrue(
+                        installedLatch.await(5, TimeUnit.SECONDS),
+                        "CREATE phải đạt trạng thái INSTALLED trước khi hủy");
+                assertFalse(createFuture.isDone(), "Future chưa được complete tại điểm handoff");
+
+                // Caller gọi future.cancel(true) đúng cửa sổ race
+                long cancelStartNanos = System.nanoTime();
+                assertTrue(createFuture.cancel(true), "cancel(true) phải thắng race tại trạng thái INSTALLED");
+                releaseCommitLatch.countDown();
+
+                assertTrue(createFuture.isCancelled());
+                assertThrows(CancellationException.class, () -> createFuture.get(100, TimeUnit.MILLISECONDS));
+
+                // Socket/ticket đã cài đặt PHẢI bị đóng trong 750 ms
+                assertSocketClosedWithin(serverSock, cancelStartNanos, CANCEL_DEADLINE_MS);
+
+                flushEdt();
+                assertFalse(
+                        events.stream().anyMatch(e -> e.state() == SessionState.WAITING_FOR_PEER),
+                        "CREATE bị hủy trước commit không được phát WAITING_FOR_PEER");
+                assertFalse(
+                        events.stream().anyMatch(e -> e.state() == SessionState.SECURE_READY),
+                        "CREATE bị hủy không được bật SECURE_READY");
+            }
+        } finally {
+            releaseCommitLatch.countDown();
+            receiverAdapter.setOnAfterOperationInstalledForTest(null);
+        }
+    }
+
+    @Test
+    void testJoinHandoffRaceCancelAfterSessionInstalledBeforeFutureComplete() throws Exception {
+        List<SessionViewModel> events = new CopyOnWriteArrayList<>();
+        senderAdapter.registerListeners(events::add, null);
+
+        CountDownLatch installedLatch = new CountDownLatch(1);
+        CountDownLatch releaseCommitLatch = new CountDownLatch(1);
+        senderAdapter.setOnAfterOperationInstalledForTest(
+                () -> {
+                    installedLatch.countDown();
+                    try {
+                        releaseCommitLatch.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+
+        try (ServerSocket controlledServer =
+                new ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"))) {
+            CompletableFuture<Socket> acceptedRef = acceptAsync(controlledServer);
+            CompletableFuture<SessionViewModel> joinFuture =
+                    senderAdapter.joinRelaySession(
+                            "127.0.0.1", controlledServer.getLocalPort(), "ABCDEFGH2345");
+
+            try (Socket serverSock = acceptedRef.get(5, TimeUnit.SECONDS)) {
+                assertEquals(17, serverSock.getInputStream().readNBytes(17).length);
+
+                // Trả lời PAIRED hợp lệ để PeerNode.attach(CLIENT) tạo và cài đặt TransferSession (INSTALLED)
+                DataOutputStream out = new DataOutputStream(serverSock.getOutputStream());
+                out.writeInt(RELAY_MAGIC);
+                out.writeByte(RELAY_STATUS_PAIRED);
+                out.flush();
+
+                // Đợi đúng điểm TransferSession đã INSTALLED nhưng joinFuture chưa complete()
+                assertTrue(
+                        installedLatch.await(5, TimeUnit.SECONDS),
+                        "JOIN phải đạt trạng thái INSTALLED trước khi hủy");
+                assertFalse(joinFuture.isDone(), "Future chưa được complete tại điểm handoff");
+
+                // Caller gọi future.cancel(true) đúng cửa sổ race
+                long cancelStartNanos = System.nanoTime();
+                assertTrue(joinFuture.cancel(true), "cancel(true) phải thắng race tại trạng thái INSTALLED");
+                releaseCommitLatch.countDown();
+
+                assertTrue(joinFuture.isCancelled());
+                assertThrows(CancellationException.class, () -> joinFuture.get(100, TimeUnit.MILLISECONDS));
+
+                // Socket/TransferSession đã cài đặt PHẢI bị đóng trong 750 ms
+                assertSocketClosedWithin(serverSock, cancelStartNanos, CANCEL_DEADLINE_MS);
+
+                flushEdt();
+                assertFalse(
+                        events.stream().anyMatch(e -> e.state() == SessionState.WAITING_FOR_FINGERPRINT),
+                        "JOIN bị hủy trước commit không được phát WAITING_FOR_FINGERPRINT");
+                assertFalse(
+                        events.stream().anyMatch(e -> e.state() == SessionState.SECURE_READY),
+                        "JOIN bị hủy không được bật SECURE_READY");
+            }
+        } finally {
+            releaseCommitLatch.countDown();
+            senderAdapter.setOnAfterOperationInstalledForTest(null);
+        }
+    }
+
+    @Test
+    void testLateCancelAfterSuccessfulFutureCompleteDoesNotDestroyValidSession() throws Exception {
+        RelayConfig cfg = new RelayConfig(32, 16, 5000, 120000, 60000, 900000, 100);
+        try (RelayServer realRelay = new RelayServer(new InetSocketAddress("127.0.0.1", 0), cfg)) {
+            AtomicReference<SessionViewModel> receiverSessionRef = new AtomicReference<>();
+            CountDownLatch receiverPaired = new CountDownLatch(1);
+            receiverAdapter.registerListeners(
+                    vm -> {
+                        if (vm.isRelay() && vm.state() == SessionState.WAITING_FOR_FINGERPRINT) {
+                            receiverSessionRef.set(vm);
+                            receiverPaired.countDown();
+                        }
+                    },
+                    null);
+
+            CompletableFuture<RelayTicketInfo> createFuture =
+                    receiverAdapter.createRelaySession("127.0.0.1", realRelay.port());
+            RelayTicketInfo ticket = createFuture.get(5, TimeUnit.SECONDS);
+
+            // Hủy muộn sau khi createFuture đã complete -> phải trả false và KHÔNG phá hủy ticket
+            assertFalse(createFuture.cancel(true), "cancel muộn sau complete phải trả false");
+
+            CompletableFuture<SessionViewModel> joinFuture =
+                    senderAdapter.joinRelaySession("127.0.0.1", realRelay.port(), ticket.pairingCode());
+            SessionViewModel senderSession = joinFuture.get(5, TimeUnit.SECONDS);
+
+            // Hủy muộn sau khi joinFuture đã complete -> phải trả false và KHÔNG phá hủy TransferSession
+            assertFalse(joinFuture.cancel(true), "cancel muộn sau complete phải trả false");
+            assertTrue(receiverPaired.await(5, TimeUnit.SECONDS));
+
+            // Cả hai bên vẫn bắt tay Mutual TLS 1.3 thành công bình thường
+            CompletableFuture<SessionViewModel> rVerify =
+                    receiverAdapter.startTlsHandshake(
+                            receiverSessionRef.get().sessionId(), senderAdapter.getLocalFingerprint());
+            CompletableFuture<SessionViewModel> sVerify =
+                    senderAdapter.startTlsHandshake(
+                            senderSession.sessionId(), receiverAdapter.getLocalFingerprint());
+
+            assertEquals(SessionState.SECURE_READY, rVerify.get(10, TimeUnit.SECONDS).state());
+            assertEquals(SessionState.SECURE_READY, sVerify.get(10, TimeUnit.SECONDS).state());
+        }
+    }
+
+    @Test
+    void testSimultaneousDisconnectAndFutureCancelDuringHandoffIsIdempotentAndAllowsReconnect()
+            throws Exception {
+        CountDownLatch installedLatch = new CountDownLatch(1);
+        CountDownLatch releaseCommitLatch = new CountDownLatch(1);
+        senderAdapter.setOnAfterOperationInstalledForTest(
+                () -> {
+                    installedLatch.countDown();
+                    try {
+                        releaseCommitLatch.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+
+        try (ServerSocket controlledServer =
+                new ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"))) {
+            CompletableFuture<Socket> acceptedRef = acceptAsync(controlledServer);
+            CompletableFuture<SessionViewModel> joinFuture =
+                    senderAdapter.joinRelaySession(
+                            "127.0.0.1", controlledServer.getLocalPort(), "ABCDEFGH2345");
+
+            try (Socket serverSock = acceptedRef.get(5, TimeUnit.SECONDS)) {
+                assertEquals(17, serverSock.getInputStream().readNBytes(17).length);
+                DataOutputStream out = new DataOutputStream(serverSock.getOutputStream());
+                out.writeInt(RELAY_MAGIC);
+                out.writeByte(RELAY_STATUS_PAIRED);
+                out.flush();
+
+                assertTrue(installedLatch.await(5, TimeUnit.SECONDS));
+
+                // Chạy đồng thời disconnect("") và future.cancel(true) từ 2 luồng
+                CountDownLatch startRace = new CountDownLatch(1);
+                CompletableFuture<Void> t1 =
+                        CompletableFuture.runAsync(
+                                () -> {
+                                    try {
+                                        startRace.await(2, TimeUnit.SECONDS);
+                                    } catch (InterruptedException ignored) {
+                                    }
+                                    senderAdapter.disconnect("");
+                                });
+                CompletableFuture<Void> t2 =
+                        CompletableFuture.runAsync(
+                                () -> {
+                                    try {
+                                        startRace.await(2, TimeUnit.SECONDS);
+                                    } catch (InterruptedException ignored) {
+                                    }
+                                    joinFuture.cancel(true);
+                                });
+
+                long startNanos = System.nanoTime();
+                startRace.countDown();
+                CompletableFuture.allOf(t1, t2).get(5, TimeUnit.SECONDS);
+                releaseCommitLatch.countDown();
+
+                assertTrue(joinFuture.isCancelled());
+                assertSocketClosedWithin(serverSock, startNanos, CANCEL_DEADLINE_MS);
+            }
+        } finally {
+            releaseCommitLatch.countDown();
+            senderAdapter.setOnAfterOperationInstalledForTest(null);
+        }
+
+        // Kết nối lại ngay sau cancel đồng thời vẫn hoạt động bình thường trên real RelayServer
+        RelayConfig cfg = new RelayConfig(32, 16, 5000, 120000, 60000, 900000, 100);
+        try (RelayServer realRelay = new RelayServer(new InetSocketAddress("127.0.0.1", 0), cfg)) {
+            RelayTicketInfo ticket =
+                    receiverAdapter
+                            .createRelaySession("127.0.0.1", realRelay.port())
+                            .get(5, TimeUnit.SECONDS);
+            SessionViewModel reconnected =
+                    senderAdapter
+                            .joinRelaySession("127.0.0.1", realRelay.port(), ticket.pairingCode())
+                            .get(5, TimeUnit.SECONDS);
+            assertEquals(SessionState.WAITING_FOR_FINGERPRINT, reconnected.state());
+        }
+    }
+
+    @Test
+    void testShutdownDuringHandoffInstalledPhaseClosesSocketWithin750ms() throws Exception {
+        CountDownLatch installedLatch = new CountDownLatch(1);
+        CountDownLatch releaseCommitLatch = new CountDownLatch(1);
+        receiverAdapter.setOnAfterOperationInstalledForTest(
+                () -> {
+                    installedLatch.countDown();
+                    try {
+                        releaseCommitLatch.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+
+        try (ServerSocket controlledServer =
+                new ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"))) {
+            CompletableFuture<Socket> acceptedRef = acceptAsync(controlledServer);
+            CompletableFuture<RelayTicketInfo> createFuture =
+                    receiverAdapter.createRelaySession("127.0.0.1", controlledServer.getLocalPort());
+
+            try (Socket serverSock = acceptedRef.get(5, TimeUnit.SECONDS)) {
+                assertEquals(5, serverSock.getInputStream().readNBytes(5).length);
+                DataOutputStream out = new DataOutputStream(serverSock.getOutputStream());
+                out.writeInt(RELAY_MAGIC);
+                out.writeByte(RELAY_STATUS_CREATED);
+                out.write("ABCDEFGH2345".getBytes(StandardCharsets.US_ASCII));
+                out.writeInt(60_000);
+                out.flush();
+
+                assertTrue(installedLatch.await(5, TimeUnit.SECONDS));
+                long startNanos = System.nanoTime();
+                receiverAdapter.shutdown();
+                releaseCommitLatch.countDown();
+
+                assertTrue(receiverAdapter.isShutdown());
+                assertTrue(createFuture.isDone() && createFuture.isCancelled());
+                assertSocketClosedWithin(serverSock, startNanos, CANCEL_DEADLINE_MS);
+            }
+        } finally {
+            releaseCommitLatch.countDown();
+            receiverAdapter.setOnAfterOperationInstalledForTest(null);
+        }
+    }
+
+    @Test
+    void testCancelOnSwingEdtDuringHandoffDoesNotBlockEdtAndClosesSocketWithin750ms()
+            throws Exception {
+        CountDownLatch installedLatch = new CountDownLatch(1);
+        CountDownLatch releaseCommitLatch = new CountDownLatch(1);
+        senderAdapter.setOnAfterOperationInstalledForTest(
+                () -> {
+                    installedLatch.countDown();
+                    try {
+                        releaseCommitLatch.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+
+        try (ServerSocket controlledServer =
+                new ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"))) {
+            CompletableFuture<Socket> acceptedRef = acceptAsync(controlledServer);
+            CompletableFuture<SessionViewModel> joinFuture =
+                    senderAdapter.joinRelaySession(
+                            "127.0.0.1", controlledServer.getLocalPort(), "ABCDEFGH2345");
+
+            try (Socket serverSock = acceptedRef.get(5, TimeUnit.SECONDS)) {
+                assertEquals(17, serverSock.getInputStream().readNBytes(17).length);
+                DataOutputStream out = new DataOutputStream(serverSock.getOutputStream());
+                out.writeInt(RELAY_MAGIC);
+                out.writeByte(RELAY_STATUS_PAIRED);
+                out.flush();
+
+                assertTrue(installedLatch.await(5, TimeUnit.SECONDS));
+
+                long startNanos = System.nanoTime();
+                SwingUtilities.invokeAndWait(() -> assertTrue(joinFuture.cancel(true)));
+                releaseCommitLatch.countDown();
+
+                assertSocketClosedWithin(serverSock, startNanos, CANCEL_DEADLINE_MS);
+            }
+        } finally {
+            releaseCommitLatch.countDown();
+            senderAdapter.setOnAfterOperationInstalledForTest(null);
+        }
+    }
+
     private static CompletableFuture<Socket> acceptAsync(ServerSocket serverSocket) {
         return CompletableFuture.supplyAsync(
                 () -> {

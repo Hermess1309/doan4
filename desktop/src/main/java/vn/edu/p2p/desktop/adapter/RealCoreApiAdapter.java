@@ -61,16 +61,30 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
             boolean serverRole,
             boolean relay) {}
 
+    private enum OperationPhase {
+        PENDING,
+        INSTALLED,
+        COMMITTED,
+        CANCELLED
+    }
+
     /**
-     * Ngữ cảnh điều khiển cancellation cho các thao tác I/O mạng khởi tạo kết nối (LAN connect,
-     * Relay CREATE, Relay JOIN) chạy trên Virtual Thread JDK 21.
-     * Hủy operation sẽ interrupt virtual thread (khiến JDK 21 NioSocketImpl đóng socket ngay lập tức)
-     * và hoàn tất CompletableFuture của caller bằng CancellationException.
+     * Ngữ cảnh điều khiển cancellation và chuyển giao ownership cho các thao tác khởi tạo kết nối
+     * (LAN connect, Relay CREATE, Relay JOIN) chạy trên Virtual Thread JDK 21.
+     *
+     * <p>Vòng đời trạng thái (bảo vệ bởi {@code sessionLock}):
+     * {@code PENDING -> INSTALLED -> COMMITTED} hoặc {@code CANCELLED}.
+     * {@code activeOperation} chỉ được giải phóng sau khi {@code resultFuture.complete(result)}
+     * thành công và trạng thái chuyển sang {@code COMMITTED}, giúp tránh race condition khi
+     * {@code future.cancel(true)} xảy ra sau khi ticket/session đã cài đặt nhưng trước khi Future hoàn tất.
      */
     private static final class PendingOperationContext {
         final long generation;
         final CompletableFuture<?> resultFuture;
         final AtomicBoolean cancelled = new AtomicBoolean(false);
+        OperationPhase phase = OperationPhase.PENDING;
+        PendingRelayContext installedRelayTicket;
+        ActiveSessionContext installedSession;
         private Future<?> workerTask;
 
         PendingOperationContext(long generation, CompletableFuture<?> resultFuture) {
@@ -168,6 +182,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
     private volatile TransferViewModel currentTransferVm = TransferViewModel.createIdle();
 
     private volatile BiConsumer<FileOffer, Consumer<File>> incomingOfferHandler;
+    private volatile Runnable onAfterOperationInstalledForTest;
 
     public RealCoreApiAdapter(PeerNode peerNode, int preferredPort) throws IOException {
         this.peerNode = Objects.requireNonNull(peerNode, "peerNode không được null");
@@ -202,6 +217,10 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
 
     public void setIncomingOfferHandler(BiConsumer<FileOffer, Consumer<File>> handler) {
         this.incomingOfferHandler = handler;
+    }
+
+    void setOnAfterOperationInstalledForTest(Runnable hook) {
+        this.onAfterOperationInstalledForTest = hook;
     }
 
     @Override
@@ -292,7 +311,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                 workerPool.submit(
                         () -> {
                             if (isOperationSuperseded(opCtx)) {
-                                clearOperationIfMatches(opCtx);
+                                cancelOperationIfNotCommitted(opCtx);
                                 resultFuture.cancel(false);
                                 return;
                             }
@@ -300,26 +319,34 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                 TransferSession session =
                                         peerNode.connect(
                                                 new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS, IO_TIMEOUT_MS);
-                                ActiveSessionContext installedCtx;
+                                ActiveSessionContext installedCtx = null;
+                                boolean supersededBeforeInstall = false;
                                 synchronized (sessionLock) {
-                                    if (isOperationSuperseded(opCtx)) {
+                                    if (isOperationSuperseded(opCtx)
+                                            || opCtx.phase != OperationPhase.PENDING) {
+                                        opCtx.phase = OperationPhase.CANCELLED;
                                         clearOperationIfMatchesLocked(opCtx);
-                                        closeQuietly(session);
-                                        resultFuture.cancel(false);
-                                        return;
+                                        supersededBeforeInstall = true;
+                                    } else {
+                                        SessionInfo info = session.info();
+                                        installedCtx =
+                                                new ActiveSessionContext(
+                                                        attemptGeneration,
+                                                        info.sessionId().toString(),
+                                                        host + ":" + port,
+                                                        session,
+                                                        false,
+                                                        false);
+                                        opCtx.installedSession = installedCtx;
+                                        opCtx.phase = OperationPhase.INSTALLED;
+                                        this.activeContext = installedCtx;
+                                        this.pendingIncomingOffer = null;
                                     }
-                                    clearOperationIfMatchesLocked(opCtx);
-                                    SessionInfo info = session.info();
-                                    installedCtx =
-                                            new ActiveSessionContext(
-                                                    attemptGeneration,
-                                                    info.sessionId().toString(),
-                                                    host + ":" + port,
-                                                    session,
-                                                    false,
-                                                    false);
-                                    this.activeContext = installedCtx;
-                                    this.pendingIncomingOffer = null;
+                                }
+                                if (supersededBeforeInstall) {
+                                    closeQuietly(session);
+                                    resultFuture.cancel(false);
+                                    return;
                                 }
 
                                 SessionViewModel vm =
@@ -332,14 +359,11 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                                 SessionState.WAITING_FOR_FINGERPRINT,
                                                 "",
                                                 installedCtx.generation());
-                                dispatchSessionUpdate(installedCtx.generation(), vm);
-                                resultFuture.complete(vm);
-                            } catch (IOException | RuntimeException e) {
-                                clearOperationIfMatches(opCtx);
-                                if (isOperationSuperseded(opCtx)) {
-                                    resultFuture.cancel(false);
+                                if (!commitInstalledOperation(opCtx, resultFuture, vm)) {
                                     return;
                                 }
+                                dispatchSessionUpdate(installedCtx.generation(), vm);
+                            } catch (IOException | RuntimeException e) {
                                 SessionViewModel errVm =
                                         new SessionViewModel(
                                                 "",
@@ -350,8 +374,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                                 SessionState.ERROR,
                                                 "Kết nối TCP thất bại: " + e.getMessage(),
                                                 attemptGeneration);
-                                dispatchSessionUpdate(attemptGeneration, errVm);
-                                resultFuture.completeExceptionally(e);
+                                failOperationExceptionally(opCtx, resultFuture, e, errVm);
                             }
                         });
         opCtx.bindTask(workerTask);
@@ -395,7 +418,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                 workerPool.submit(
                         () -> {
                             if (isOperationSuperseded(opCtx)) {
-                                clearOperationIfMatches(opCtx);
+                                cancelOperationIfNotCommitted(opCtx);
                                 resultFuture.cancel(false);
                                 return;
                             }
@@ -404,17 +427,33 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                         RelayClient.create(
                                                 new InetSocketAddress(trimmedHost, relayPort),
                                                 RELAY_CONTROL_TIMEOUT_MS);
-                                PendingRelayContext relayCtx;
+                                PendingRelayContext relayCtx = null;
+                                boolean supersededBeforeInstall = false;
                                 synchronized (sessionLock) {
-                                    if (isOperationSuperseded(opCtx)) {
+                                    if (isOperationSuperseded(opCtx)
+                                            || opCtx.phase != OperationPhase.PENDING) {
+                                        opCtx.phase = OperationPhase.CANCELLED;
                                         clearOperationIfMatchesLocked(opCtx);
-                                        closeQuietly(ticket);
-                                        resultFuture.cancel(false);
-                                        return;
+                                        supersededBeforeInstall = true;
+                                    } else {
+                                        relayCtx =
+                                                new PendingRelayContext(attemptGeneration, relayAddress, ticket);
+                                        opCtx.installedRelayTicket = relayCtx;
+                                        opCtx.phase = OperationPhase.INSTALLED;
+                                        this.activeRelayTicket = relayCtx;
                                     }
-                                    clearOperationIfMatchesLocked(opCtx);
-                                    relayCtx = new PendingRelayContext(attemptGeneration, relayAddress, ticket);
-                                    this.activeRelayTicket = relayCtx;
+                                }
+                                if (supersededBeforeInstall) {
+                                    closeQuietly(ticket);
+                                    resultFuture.cancel(false);
+                                    return;
+                                }
+
+                                RelayTicketInfo ticketInfo =
+                                        new RelayTicketInfo(
+                                                attemptGeneration, ticket.code(), ticket.ttlMillis(), relayAddress);
+                                if (!commitInstalledOperation(opCtx, resultFuture, ticketInfo)) {
+                                    return;
                                 }
 
                                 dispatchSessionUpdate(
@@ -429,33 +468,25 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                                 "",
                                                 attemptGeneration));
 
-                                // Bắt đầu chờ peer JOIN trên background worker (không chặn EDT)
-                                Future<?> waiterTask = workerPool.submit(() -> awaitRelayPair(relayCtx));
-                                relayCtx.bindWaiter(waiterTask);
-
-                                resultFuture.complete(
-                                        new RelayTicketInfo(
-                                                attemptGeneration, ticket.code(), ticket.ttlMillis(), relayAddress));
+                                // Chỉ khởi chạy awaitPair sau khi COMMITTED (nếu bị disconnect ngay sau commit thì dừng)
+                                if (isCurrentRelayContext(relayCtx)) {
+                                    final PendingRelayContext committedRelayCtx = relayCtx;
+                                    Future<?> waiterTask =
+                                            workerPool.submit(() -> awaitRelayPair(committedRelayCtx));
+                                    committedRelayCtx.bindWaiter(waiterTask);
+                                }
                             } catch (IOException | RuntimeException e) {
-                                clearOperationIfMatches(opCtx);
-                                if (isOperationSuperseded(opCtx)) {
-                                    resultFuture.cancel(false);
-                                    return;
-                                }
-                                if (running.get() && activeGeneration.get() == attemptGeneration) {
-                                    dispatchSessionUpdate(
-                                            attemptGeneration,
-                                            new SessionViewModel(
-                                                    "",
-                                                    "Relay (" + relayAddress + ")",
-                                                    peerNode.localFingerprint(),
-                                                    "",
-                                                    true,
-                                                    SessionState.ERROR,
-                                                    "Không thể tạo mã ghép nối trên Relay: " + e.getMessage(),
-                                                    attemptGeneration));
-                                }
-                                resultFuture.completeExceptionally(e);
+                                SessionViewModel errVm =
+                                        new SessionViewModel(
+                                                "",
+                                                "Relay (" + relayAddress + ")",
+                                                peerNode.localFingerprint(),
+                                                "",
+                                                true,
+                                                SessionState.ERROR,
+                                                "Không thể tạo mã ghép nối trên Relay: " + e.getMessage(),
+                                                attemptGeneration);
+                                failOperationExceptionally(opCtx, resultFuture, e, errVm);
                             }
                         });
         opCtx.bindTask(workerTask);
@@ -488,29 +519,34 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
             TransferSession session =
                     peerNode.attach(pairedSocket, PeerNode.TlsRole.SERVER, IO_TIMEOUT_MS);
 
-            ActiveSessionContext installedCtx;
+            ActiveSessionContext installedCtx = null;
+            boolean supersededBeforeInstall = false;
             synchronized (sessionLock) {
                 if (relayCtx.cancelled.get()
                         || Thread.currentThread().isInterrupted()
                         || !running.get()
                         || activeGeneration.get() != relayCtx.generation) {
-                    closeQuietly(session);
-                    return;
+                    supersededBeforeInstall = true;
+                } else {
+                    if (this.activeRelayTicket == relayCtx) {
+                        this.activeRelayTicket = null;
+                    }
+                    SessionInfo info = session.info();
+                    installedCtx =
+                            new ActiveSessionContext(
+                                    relayCtx.generation,
+                                    info.sessionId().toString(),
+                                    "Relay (" + relayCtx.relayAddress + ")",
+                                    session,
+                                    true,
+                                    true);
+                    this.activeContext = installedCtx;
+                    this.pendingIncomingOffer = null;
                 }
-                if (this.activeRelayTicket == relayCtx) {
-                    this.activeRelayTicket = null;
-                }
-                SessionInfo info = session.info();
-                installedCtx =
-                        new ActiveSessionContext(
-                                relayCtx.generation,
-                                info.sessionId().toString(),
-                                "Relay (" + relayCtx.relayAddress + ")",
-                                session,
-                                true,
-                                true);
-                this.activeContext = installedCtx;
-                this.pendingIncomingOffer = null;
+            }
+            if (supersededBeforeInstall) {
+                closeQuietly(session);
+                return;
             }
 
             dispatchSessionUpdate(
@@ -590,7 +626,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                 workerPool.submit(
                         () -> {
                             if (isOperationSuperseded(opCtx)) {
-                                clearOperationIfMatches(opCtx);
+                                cancelOperationIfNotCommitted(opCtx);
                                 resultFuture.cancel(false);
                                 return;
                             }
@@ -601,7 +637,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                                 canonicalCode,
                                                 RELAY_CONTROL_TIMEOUT_MS);
                                 if (isOperationSuperseded(opCtx)) {
-                                    clearOperationIfMatches(opCtx);
+                                    cancelOperationIfNotCommitted(opCtx);
                                     closeQuietly(pairedSocket);
                                     resultFuture.cancel(false);
                                     return;
@@ -623,26 +659,34 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                 TransferSession session =
                                         peerNode.attach(pairedSocket, PeerNode.TlsRole.CLIENT, IO_TIMEOUT_MS);
 
-                                ActiveSessionContext installedCtx;
+                                ActiveSessionContext installedCtx = null;
+                                boolean supersededBeforeInstall = false;
                                 synchronized (sessionLock) {
-                                    if (isOperationSuperseded(opCtx)) {
+                                    if (isOperationSuperseded(opCtx)
+                                            || opCtx.phase != OperationPhase.PENDING) {
+                                        opCtx.phase = OperationPhase.CANCELLED;
                                         clearOperationIfMatchesLocked(opCtx);
-                                        closeQuietly(session);
-                                        resultFuture.cancel(false);
-                                        return;
+                                        supersededBeforeInstall = true;
+                                    } else {
+                                        SessionInfo info = session.info();
+                                        installedCtx =
+                                                new ActiveSessionContext(
+                                                        attemptGeneration,
+                                                        info.sessionId().toString(),
+                                                        "Relay (" + relayAddress + ")",
+                                                        session,
+                                                        false,
+                                                        true);
+                                        opCtx.installedSession = installedCtx;
+                                        opCtx.phase = OperationPhase.INSTALLED;
+                                        this.activeContext = installedCtx;
+                                        this.pendingIncomingOffer = null;
                                     }
-                                    clearOperationIfMatchesLocked(opCtx);
-                                    SessionInfo info = session.info();
-                                    installedCtx =
-                                            new ActiveSessionContext(
-                                                    attemptGeneration,
-                                                    info.sessionId().toString(),
-                                                    "Relay (" + relayAddress + ")",
-                                                    session,
-                                                    false,
-                                                    true);
-                                    this.activeContext = installedCtx;
-                                    this.pendingIncomingOffer = null;
+                                }
+                                if (supersededBeforeInstall) {
+                                    closeQuietly(session);
+                                    resultFuture.cancel(false);
+                                    return;
                                 }
 
                                 SessionViewModel vm =
@@ -655,29 +699,23 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                                 SessionState.WAITING_FOR_FINGERPRINT,
                                                 "",
                                                 installedCtx.generation());
-                                dispatchSessionUpdate(installedCtx.generation(), vm);
-                                resultFuture.complete(vm);
-                            } catch (IOException | RuntimeException e) {
-                                clearOperationIfMatches(opCtx);
-                                if (isOperationSuperseded(opCtx)) {
-                                    resultFuture.cancel(false);
+                                if (!commitInstalledOperation(opCtx, resultFuture, vm)) {
                                     return;
                                 }
-                                if (running.get() && activeGeneration.get() == attemptGeneration) {
-                                    dispatchSessionUpdate(
-                                            attemptGeneration,
-                                            new SessionViewModel(
-                                                    "",
-                                                    "Relay (" + relayAddress + ")",
-                                                    peerNode.localFingerprint(),
-                                                    "",
-                                                    true,
-                                                    SessionState.ERROR,
-                                                    "Kết nối Relay thất bại (mã không hợp lệ/hết hạn hoặc máy chủ không sẵn sàng): "
-                                                            + e.getMessage(),
-                                                    attemptGeneration));
-                                }
-                                resultFuture.completeExceptionally(e);
+                                dispatchSessionUpdate(installedCtx.generation(), vm);
+                            } catch (IOException | RuntimeException e) {
+                                SessionViewModel errVm =
+                                        new SessionViewModel(
+                                                "",
+                                                "Relay (" + relayAddress + ")",
+                                                peerNode.localFingerprint(),
+                                                "",
+                                                true,
+                                                SessionState.ERROR,
+                                                "Kết nối Relay thất bại (mã không hợp lệ/hết hạn hoặc máy chủ không sẵn sàng): "
+                                                        + e.getMessage(),
+                                                attemptGeneration);
+                                failOperationExceptionally(opCtx, resultFuture, e, errVm);
                             }
                         });
         opCtx.bindTask(workerTask);
@@ -1241,6 +1279,9 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
             long nextGen = generationSequence.incrementAndGet();
             activeGeneration.set(nextGen);
             PendingOperationContext oldOp = this.activeOperation;
+            if (oldOp != null && oldOp.phase != OperationPhase.COMMITTED) {
+                oldOp.phase = OperationPhase.CANCELLED;
+            }
             PendingRelayContext oldTicket = this.activeRelayTicket;
             TransferSession oldSession =
                     (this.activeContext != null) ? this.activeContext.session() : null;
@@ -1255,35 +1296,165 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
         }
 
         cancelDetachedAsyncHandles(previous);
-        if (previous.relayTicketToClose() != null || previous.sessionToClose() != null) {
-            if (SwingUtilities.isEventDispatchThread() && running.get()) {
-                workerPool.submit(() -> closeDetachedIo(previous));
-            } else {
-                closeDetachedIo(previous);
-            }
-        }
+        closeDetachedIoSafely(previous);
 
         resultFuture.whenComplete(
                 (res, err) -> {
                     if (resultFuture.isCancelled()) {
-                        cancelOperationIfStillActive(opCtx);
+                        cancelOperationIfNotCommitted(opCtx);
                     }
                 });
         return opCtx;
     }
 
-    private void cancelOperationIfStillActive(PendingOperationContext opCtx) {
-        long nextGen = -1L;
+    /**
+     * Chuyển giao ownership từ trạng thái {@code INSTALLED} sang {@code COMMITTED} qua
+     * điểm tuyến tính hóa (linearization point) của {@code resultFuture.complete(value)}.
+     * Nếu {@code future.cancel(true)}, {@code disconnect()} hoặc {@code shutdown()} thắng race,
+     * mọi tài nguyên đã cài đặt cho {@code opCtx} được dọn dẹp idempotent ngoài {@code sessionLock}.
+     */
+    private <T> boolean commitInstalledOperation(
+            PendingOperationContext opCtx, CompletableFuture<T> resultFuture, T value) {
+        Runnable testHook = this.onAfterOperationInstalledForTest;
+        if (testHook != null) {
+            testHook.run();
+        }
+
+        DetachedResources preCancelDetach = null;
         synchronized (sessionLock) {
-            if (this.activeOperation == opCtx && activeGeneration.get() == opCtx.generation) {
-                this.activeOperation = null;
-                nextGen = generationSequence.incrementAndGet();
-                activeGeneration.set(nextGen);
+            if (opCtx.phase != OperationPhase.INSTALLED
+                    || !running.get()
+                    || activeGeneration.get() != opCtx.generation
+                    || resultFuture.isCancelled()) {
+                preCancelDetach = cancelOperationLocked(opCtx);
             }
         }
-        opCtx.cancelOperation();
-        if (nextGen > 0 && running.get()) {
-            dispatchSessionUpdate(nextGen, SessionViewModel.createDisconnected(nextGen));
+        if (preCancelDetach != null) {
+            finishCancellationOutsideLock(preCancelDetach);
+            return false;
+        }
+
+        // Linearization point giữa complete(value) và future.cancel(true)
+        boolean wonFuture = resultFuture.complete(value);
+        if (!wonFuture) {
+            cancelOperationIfNotCommitted(opCtx);
+            return false;
+        }
+
+        DetachedResources concurrentCancelDetach = null;
+        synchronized (sessionLock) {
+            if (opCtx.phase == OperationPhase.INSTALLED
+                    && running.get()
+                    && activeGeneration.get() == opCtx.generation) {
+                opCtx.phase = OperationPhase.COMMITTED;
+                clearOperationIfMatchesLocked(opCtx);
+                return true;
+            }
+            concurrentCancelDetach = cancelOperationLocked(opCtx);
+        }
+        if (concurrentCancelDetach != null) {
+            finishCancellationOutsideLock(concurrentCancelDetach);
+        }
+        return false;
+    }
+
+    private <T> void failOperationExceptionally(
+            PendingOperationContext opCtx,
+            CompletableFuture<T> resultFuture,
+            Exception error,
+            SessionViewModel errorVm) {
+        boolean shouldReportError = false;
+        DetachedResources detached = null;
+        synchronized (sessionLock) {
+            if (opCtx.phase == OperationPhase.COMMITTED || opCtx.phase == OperationPhase.CANCELLED) {
+                return;
+            }
+            if (isOperationSuperseded(opCtx)) {
+                detached = cancelOperationLocked(opCtx);
+            } else {
+                opCtx.phase = OperationPhase.CANCELLED;
+                clearOperationIfMatchesLocked(opCtx);
+                PendingRelayContext ticketToClose = null;
+                TransferSession sessionToClose = null;
+                if (opCtx.installedRelayTicket != null
+                        && this.activeRelayTicket == opCtx.installedRelayTicket) {
+                    ticketToClose = this.activeRelayTicket;
+                    this.activeRelayTicket = null;
+                }
+                if (opCtx.installedSession != null && this.activeContext == opCtx.installedSession) {
+                    sessionToClose = this.activeContext.session();
+                    this.activeContext = null;
+                    this.pendingIncomingOffer = null;
+                }
+                if (ticketToClose != null || sessionToClose != null) {
+                    detached = new DetachedResources(-1L, null, ticketToClose, sessionToClose);
+                }
+                shouldReportError = running.get() && activeGeneration.get() == opCtx.generation;
+            }
+        }
+
+        if (!shouldReportError) {
+            if (detached != null) {
+                finishCancellationOutsideLock(detached);
+            }
+            resultFuture.cancel(false);
+            return;
+        }
+
+        if (detached != null) {
+            closeDetachedIoSafely(detached);
+        }
+        if (errorVm != null) {
+            dispatchSessionUpdate(opCtx.generation, errorVm);
+        }
+        resultFuture.completeExceptionally(error);
+    }
+
+    private void cancelOperationIfNotCommitted(PendingOperationContext opCtx) {
+        DetachedResources detached;
+        synchronized (sessionLock) {
+            detached = cancelOperationLocked(opCtx);
+        }
+        if (detached != null) {
+            finishCancellationOutsideLock(detached);
+        }
+    }
+
+    private DetachedResources cancelOperationLocked(PendingOperationContext opCtx) {
+        if (opCtx.phase == OperationPhase.COMMITTED || opCtx.phase == OperationPhase.CANCELLED) {
+            return null;
+        }
+        opCtx.phase = OperationPhase.CANCELLED;
+
+        PendingRelayContext ticketToClose = null;
+        TransferSession sessionToClose = null;
+        long nextGen = -1L;
+
+        clearOperationIfMatchesLocked(opCtx);
+        if (opCtx.installedRelayTicket != null
+                && this.activeRelayTicket == opCtx.installedRelayTicket) {
+            ticketToClose = this.activeRelayTicket;
+            this.activeRelayTicket = null;
+        }
+        if (opCtx.installedSession != null && this.activeContext == opCtx.installedSession) {
+            sessionToClose = this.activeContext.session();
+            this.activeContext = null;
+            this.pendingIncomingOffer = null;
+        }
+        if (activeGeneration.get() == opCtx.generation) {
+            nextGen = generationSequence.incrementAndGet();
+            activeGeneration.set(nextGen);
+        }
+        return new DetachedResources(nextGen, opCtx, ticketToClose, sessionToClose);
+    }
+
+    private void finishCancellationOutsideLock(DetachedResources detached) {
+        cancelDetachedAsyncHandles(detached);
+        closeDetachedIoSafely(detached);
+        if (detached.nextGeneration() > 0 && running.get()) {
+            dispatchSessionUpdate(
+                    detached.nextGeneration(),
+                    SessionViewModel.createDisconnected(detached.nextGeneration()));
         }
     }
 
@@ -1298,6 +1469,9 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
             long nextGen = generationSequence.incrementAndGet();
             activeGeneration.set(nextGen);
             PendingOperationContext oldOp = this.activeOperation;
+            if (oldOp != null && oldOp.phase != OperationPhase.COMMITTED) {
+                oldOp.phase = OperationPhase.CANCELLED;
+            }
             PendingRelayContext oldTicket = this.activeRelayTicket;
             TransferSession oldSession =
                     (this.activeContext != null) ? this.activeContext.session() : null;
@@ -1326,17 +1500,26 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
         closeQuietly(detached.sessionToClose());
     }
 
+    /**
+     * Đóng socket/ticket/session đã tách ngoài {@code sessionLock} và tuyệt đối không block Swing EDT.
+     */
+    private static void closeDetachedIoSafely(DetachedResources detached) {
+        if (detached.relayTicketToClose() == null && detached.sessionToClose() == null) {
+            return;
+        }
+        if (SwingUtilities.isEventDispatchThread()) {
+            Thread.ofVirtual().name("p2p-close-detached-io").start(() -> closeDetachedIo(detached));
+        } else {
+            closeDetachedIo(detached);
+        }
+    }
+
     private boolean isOperationSuperseded(PendingOperationContext opCtx) {
         return opCtx.cancelled.get()
+                || opCtx.resultFuture.isCancelled()
                 || Thread.currentThread().isInterrupted()
                 || !running.get()
                 || activeGeneration.get() != opCtx.generation;
-    }
-
-    private void clearOperationIfMatches(PendingOperationContext opCtx) {
-        synchronized (sessionLock) {
-            clearOperationIfMatchesLocked(opCtx);
-        }
     }
 
     private void clearOperationIfMatchesLocked(PendingOperationContext opCtx) {
