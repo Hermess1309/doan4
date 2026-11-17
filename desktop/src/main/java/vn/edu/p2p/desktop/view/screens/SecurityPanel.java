@@ -210,6 +210,15 @@ public class SecurityPanel extends JPanel {
             return;
         }
 
+        if (currentSession.state() == SessionState.RELAY_CONNECTING
+                || currentSession.state() == SessionState.WAITING_FOR_PEER) {
+            lblSessionInfo.setText(addr.isBlank() ? "Đang chờ ghép nối Relay" : addr);
+            lblVerificationBadge.setText("[⟳] " + currentSession.state().getDisplayName().toUpperCase());
+            lblVerificationBadge.setForeground(new Color(229, 168, 59));
+            btnOpenVerificationDialog.setEnabled(false);
+            return;
+        }
+
         if (sId.isBlank() || currentSession.state() == SessionState.DISCONNECTED) {
             lblSessionInfo.setText("Chưa có phiên kết nối");
             lblVerificationBadge.setText("[!] CHƯA KẾT NỐI (DISCONNECTED)");

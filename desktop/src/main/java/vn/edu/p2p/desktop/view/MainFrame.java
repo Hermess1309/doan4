@@ -130,14 +130,40 @@ public class MainFrame extends JFrame {
                         currentAdapter.connectDirect(host, port);
                     }
                 });
+        devicesPanel.setOnCreateRelayRequested(
+                (host, port) -> {
+                    CoreApiAdapter currentAdapter = this.adapter;
+                    if (backendState == BackendState.READY && currentAdapter != null) {
+                        currentAdapter
+                                .createRelaySession(host, port)
+                                .thenAccept(
+                                        ticket ->
+                                                SwingUtilities.invokeLater(
+                                                        () -> {
+                                                            if (!resourcesClosed.get()
+                                                                    && backendState == BackendState.READY
+                                                                    && ticket != null
+                                                                    && ticket.sessionGeneration()
+                                                                            >= activeSessionGeneration) {
+                                                                devicesPanel.displayGeneratedRelayTicket(ticket);
+                                                            }
+                                                        }))
+                                .exceptionally(err -> null);
+                    }
+                });
+        devicesPanel.setOnJoinRelayRequested(
+                (host, port, pairingCode) -> {
+                    CoreApiAdapter currentAdapter = this.adapter;
+                    if (backendState == BackendState.READY && currentAdapter != null) {
+                        currentAdapter.joinRelaySession(host, port, pairingCode);
+                    }
+                });
         devicesPanel.setOnDisconnectRequested(
                 () -> {
                     CoreApiAdapter currentAdapter = this.adapter;
-                    if (backendState == BackendState.READY
-                            && currentAdapter != null
-                            && currentSession != null
-                            && !currentSession.sessionId().isBlank()) {
-                        currentAdapter.disconnect(currentSession.sessionId());
+                    if (backendState == BackendState.READY && currentAdapter != null) {
+                        String sId = (currentSession != null) ? currentSession.sessionId() : "";
+                        currentAdapter.disconnect(sId);
                     }
                 });
 
@@ -447,6 +473,26 @@ public class MainFrame extends JFrame {
             return;
         }
 
+        if (currentSession.state() == SessionState.RELAY_CONNECTING) {
+            headerPanel.setConnectionBadge("[ ⟳ Đang kết nối Relay... ]", new Color(53, 116, 240));
+            statusBarPanel.setEngineStatus("Đang kết nối tới Relay Server...");
+            return;
+        }
+
+        if (currentSession.state() == SessionState.WAITING_FOR_PEER) {
+            headerPanel.setConnectionBadge("[ ⟳ Relay: Chờ đối tác ]", new Color(229, 168, 59));
+            statusBarPanel.setEngineStatus("Đang chờ đối tác ghép nối qua Relay (Chưa có TLS)");
+            return;
+        }
+
+        if (currentSession.state() == SessionState.TCP_CONNECTED) {
+            headerPanel.setConnectionBadge(
+                    "[ TCP: " + currentSession.remoteAddress() + " (Chưa TLS) ]",
+                    new Color(229, 168, 59));
+            statusBarPanel.setEngineStatus("Đã ghép nối TCP — Chờ nhập vân tay trước khi bắt tay TLS");
+            return;
+        }
+
         if (currentSession.sessionId().isBlank()
                 || currentSession.state() == SessionState.DISCONNECTED) {
             headerPanel.setConnectionBadge("[ Chưa kết nối ]", new Color(157, 160, 168));
@@ -455,15 +501,12 @@ public class MainFrame extends JFrame {
         }
 
         switch (currentSession.state()) {
-            case TCP_CONNECTED -> {
-                headerPanel.setConnectionBadge(
-                        "[ TCP: " + currentSession.remoteAddress() + " (Chưa TLS) ]",
-                        new Color(229, 168, 59));
-                statusBarPanel.setEngineStatus("Đã nối TCP — Chờ nhập vân tay trước khi bắt tay TLS");
-            }
             case WAITING_FOR_FINGERPRINT -> {
-                headerPanel.setConnectionBadge("[ Chờ nhập vân tay ]", new Color(229, 168, 59));
-                statusBarPanel.setEngineStatus("Chờ nhập vân tay đối tác từ kênh độc lập");
+                String channel = currentSession.isRelay() ? "Relay" : "LAN";
+                headerPanel.setConnectionBadge(
+                        "[ " + channel + ": Chờ nhập vân tay ]", new Color(229, 168, 59));
+                statusBarPanel.setEngineStatus(
+                        "Đã ghép nối TCP (" + channel + ") — Chờ nhập vân tay đối tác từ kênh độc lập");
             }
             case TLS_HANDSHAKING -> {
                 headerPanel.setConnectionBadge("[ ⟳ Đang bắt tay TLS 1.3... ]", new Color(53, 116, 240));

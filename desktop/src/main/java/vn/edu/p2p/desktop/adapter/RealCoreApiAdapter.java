@@ -3,44 +3,51 @@ package vn.edu.p2p.desktop.adapter;
 import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import javax.swing.SwingUtilities;
 import vn.edu.p2p.core.FileOffer;
 import vn.edu.p2p.core.PeerListener;
 import vn.edu.p2p.core.PeerNode;
 import vn.edu.p2p.core.SessionInfo;
-import vn.edu.p2p.core.TransferProgress;
 import vn.edu.p2p.core.TransferProgress.State;
 import vn.edu.p2p.core.TransferRejectedException;
 import vn.edu.p2p.core.TransferResult;
 import vn.edu.p2p.core.TransferSession;
+import vn.edu.p2p.desktop.model.RelayTicketInfo;
 import vn.edu.p2p.desktop.model.SessionViewModel;
 import vn.edu.p2p.desktop.model.SessionViewModel.SessionState;
 import vn.edu.p2p.desktop.model.TransferViewModel;
 import vn.edu.p2p.desktop.model.TransferViewModel.TransferDirection;
 import vn.edu.p2p.desktop.model.TransferViewModel.TransferState;
 import vn.edu.p2p.desktop.util.ValidationUtils;
+import vn.edu.p2p.relay.RelayClient;
 
 /**
- * Triển khai Adapter thực tế kết nối trực tiếp giao diện Java Swing với Core M3 backend.
- * - Quản lý PeerNode và vòng đời TransferSession theo cơ chế session generation bất biến.
- * - Mọi callback (SECURE_READY, ERROR, OFFER, TRANSFER, CANCEL) đều gắn sessionId và generation;
- *   kiểm tra tính hợp lệ cả trước khi xếp hàng và ngay tại thời điểm thực thi trên Swing EDT.
- * - Lắng nghe kết nối LAN, thực hiện TLS 1.3 pinning handshake và truyền tệp hoàn toàn ngoài EDT.
+ * Triển khai Adapter thực tế kết nối trực tiếp giao diện Java Swing với Core M3 và Relay M6.
+ * - Hỗ trợ cả LAN trực tiếp (PeerNode.connect / PeerListener.accept) lẫn Relay (RelayClient CREATE/JOIN + PeerNode.attach).
+ * - Quản lý vòng đời phiên và vé chờ Relay theo sessionGeneration bất biến; mọi callback đều kiểm tra
+ *   generation/sessionId cả trước khi xếp hàng và ngay tại lúc thực thi trên Swing EDT.
+ * - Không bao giờ ghi mã pairing ra log; không bao giờ bật SECURE_READY trước khi mutual TLS 1.3 thành công.
  */
 public class RealCoreApiAdapter implements CoreApiAdapter {
 
@@ -48,19 +55,155 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
     private static final int ACCEPT_TIMEOUT_MS = 3000;
     private static final int IO_TIMEOUT_MS = 60000;
     private static final int CONNECT_TIMEOUT_MS = 10000;
+    private static final int RELAY_CONTROL_TIMEOUT_MS = 15000;
 
     private record ActiveSessionContext(
             long generation,
             String sessionId,
             String remoteAddress,
             TransferSession session,
-            boolean serverRole) {}
+            boolean serverRole,
+            boolean relay) {}
+
+    private enum OperationPhase {
+        PENDING,
+        INSTALLED,
+        COMMITTED,
+        CANCELLED
+    }
+
+    /**
+     * Ngữ cảnh điều khiển cancellation và chuyển giao ownership cho các thao tác khởi tạo kết nối
+     * (LAN connect, Relay CREATE, Relay JOIN) chạy trên Virtual Thread JDK 21.
+     *
+     * <p>Vòng đời trạng thái (bảo vệ bởi {@code sessionLock}):
+     * {@code PENDING -> INSTALLED -> COMMITTED} hoặc {@code CANCELLED}.
+     * {@code activeOperation} chỉ được giải phóng sau khi {@code resultFuture.complete(result)}
+     * thành công và trạng thái chuyển sang {@code COMMITTED}, giúp tránh race condition khi
+     * {@code future.cancel(true)} xảy ra sau khi ticket/session đã cài đặt nhưng trước khi Future hoàn tất.
+     */
+    private static final class PendingOperationContext {
+        final long generation;
+        final CompletableFuture<?> resultFuture;
+        final AtomicBoolean cancelled = new AtomicBoolean(false);
+        OperationPhase phase = OperationPhase.PENDING;
+        PendingRelayContext installedRelayTicket;
+        ActiveSessionContext installedSession;
+        private Future<?> workerTask;
+
+        PendingOperationContext(long generation, CompletableFuture<?> resultFuture) {
+            this.generation = generation;
+            this.resultFuture = resultFuture;
+        }
+
+        void bindTask(Future<?> task) {
+            boolean shouldCancelNow;
+            synchronized (this) {
+                this.workerTask = task;
+                shouldCancelNow = cancelled.get();
+            }
+            if (shouldCancelNow && task != null) {
+                task.cancel(true);
+            }
+        }
+
+        void cancelOperation() {
+            cancelled.set(true);
+            Future<?> task;
+            synchronized (this) {
+                task = this.workerTask;
+            }
+            if (task != null) {
+                task.cancel(true);
+            }
+            resultFuture.cancel(false);
+        }
+    }
+
+    private static final class PendingRelayContext {
+        final long generation;
+        final String relayAddress;
+        final RelayClient.Pending ticket;
+        final AtomicBoolean cancelled = new AtomicBoolean(false);
+        private Future<?> waiterTask;
+
+        PendingRelayContext(long generation, String relayAddress, RelayClient.Pending ticket) {
+            this.generation = generation;
+            this.relayAddress = relayAddress;
+            this.ticket = ticket;
+        }
+
+        void bindWaiter(Future<?> task) {
+            boolean shouldCancelNow;
+            synchronized (this) {
+                this.waiterTask = task;
+                shouldCancelNow = cancelled.get();
+            }
+            if (shouldCancelNow && task != null) {
+                task.cancel(true);
+            }
+        }
+
+        void cancelWaiter() {
+            cancelled.set(true);
+            Future<?> task;
+            synchronized (this) {
+                task = this.waiterTask;
+            }
+            if (task != null) {
+                task.cancel(true);
+            }
+        }
+    }
+
+    /**
+     * Tài nguyên đã được tách khỏi trạng thái hoạt động của adapter dưới {@code sessionLock}.
+     * Mỗi thực thể giữ đúng tham chiếu ticket/session của phiên đó (không bao giờ đóng nhầm phiên khác)
+     * và đảm bảo đóng I/O tối đa một lần (idempotent) ngay cả khi nhiều luồng ({@code disconnect},
+     * {@code cancel}, {@code shutdown}) cùng tiến hành dọn dẹp đồng thời.
+     */
+    private static final class DetachedResources {
+        final long nextGeneration;
+        final PendingOperationContext operationToCancel;
+        final PendingRelayContext relayTicketToClose;
+        final TransferSession sessionToClose;
+        private final AtomicBoolean ioClosed = new AtomicBoolean(false);
+
+        DetachedResources(
+                long nextGeneration,
+                PendingOperationContext operationToCancel,
+                PendingRelayContext relayTicketToClose,
+                TransferSession sessionToClose) {
+            this.nextGeneration = nextGeneration;
+            this.operationToCancel = operationToCancel;
+            this.relayTicketToClose = relayTicketToClose;
+            this.sessionToClose = sessionToClose;
+        }
+
+        boolean hasCloseableIo() {
+            return relayTicketToClose != null || sessionToClose != null;
+        }
+
+        void closeIoIdempotently() {
+            if (!hasCloseableIo()) {
+                return;
+            }
+            if (ioClosed.compareAndSet(false, true)) {
+                if (relayTicketToClose != null) {
+                    closeQuietly(relayTicketToClose.ticket);
+                }
+                closeQuietly(sessionToClose);
+            }
+        }
+    }
 
     private record PendingOfferContext(long generation, String sessionId, FileOffer offer) {}
 
     private final PeerNode peerNode;
     private final PeerListener serverListener;
     private final ExecutorService workerPool;
+    private final ExecutorService cleanupPool;
+    private final Set<DetachedResources> pendingCleanups = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean running = new AtomicBoolean(true);
 
     private final Object sessionLock = new Object();
@@ -73,15 +216,20 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
             new CopyOnWriteArrayList<>();
 
     private volatile ActiveSessionContext activeContext;
+    private volatile PendingOperationContext activeOperation;
+    private volatile PendingRelayContext activeRelayTicket;
     private volatile PendingOfferContext pendingIncomingOffer;
     private volatile SessionViewModel currentSessionVm = SessionViewModel.createDisconnected();
     private volatile TransferViewModel currentTransferVm = TransferViewModel.createIdle();
 
     private volatile BiConsumer<FileOffer, Consumer<File>> incomingOfferHandler;
+    private volatile Runnable onAfterOperationInstalledForTest;
+    private volatile Runnable onAfterDisconnectDetachedForTest;
 
     public RealCoreApiAdapter(PeerNode peerNode, int preferredPort) throws IOException {
         this.peerNode = Objects.requireNonNull(peerNode, "peerNode không được null");
         this.workerPool = Executors.newVirtualThreadPerTaskExecutor();
+        this.cleanupPool = Executors.newVirtualThreadPerTaskExecutor();
 
         PeerListener listener = null;
         if (preferredPort >= 0) {
@@ -112,6 +260,14 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
 
     public void setIncomingOfferHandler(BiConsumer<FileOffer, Consumer<File>> handler) {
         this.incomingOfferHandler = handler;
+    }
+
+    void setOnAfterOperationInstalledForTest(Runnable hook) {
+        this.onAfterOperationInstalledForTest = hook;
+    }
+
+    void setOnAfterDisconnectDetachedForTest(Runnable hook) {
+        this.onAfterDisconnectDetachedForTest = hook;
     }
 
     @Override
@@ -147,20 +303,27 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
     }
 
     private void handleIncomingSession(TransferSession acceptedSession) {
-        ActiveSessionContext newCtx;
+        ActiveSessionContext newCtx = null;
         synchronized (sessionLock) {
-            if (!running.get() || activeContext != null) {
-                closeQuietly(acceptedSession);
-                return;
+            if (!running.get()
+                    || activeContext != null
+                    || activeRelayTicket != null
+                    || activeOperation != null) {
+                newCtx = null;
+            } else {
+                long gen = generationSequence.incrementAndGet();
+                SessionInfo info = acceptedSession.info();
+                newCtx =
+                        new ActiveSessionContext(
+                                gen, info.sessionId().toString(), "Peer từ mạng LAN", acceptedSession, true, false);
+                this.activeContext = newCtx;
+                this.pendingIncomingOffer = null;
+                this.activeGeneration.set(gen);
             }
-            long gen = generationSequence.incrementAndGet();
-            SessionInfo info = acceptedSession.info();
-            newCtx =
-                    new ActiveSessionContext(
-                            gen, info.sessionId().toString(), "Peer từ mạng LAN", acceptedSession, true);
-            this.activeContext = newCtx;
-            this.pendingIncomingOffer = null;
-            this.activeGeneration.set(gen);
+        }
+        if (newCtx == null) {
+            closeQuietly(acceptedSession);
+            return;
         }
 
         SessionViewModel vm =
@@ -191,73 +354,446 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                     new IllegalStateException("Adapter đã đóng, không thể tạo kết nối mới."));
         }
 
-        // Cấp ngay thế hệ mới và vô hiệu hóa phiên cũ trước khi mở kết nối TCP mới
-        final long attemptGeneration = invalidateAndReserveGeneration();
+        CompletableFuture<SessionViewModel> resultFuture = new CompletableFuture<>();
+        PendingOperationContext opCtx = startCancellableOperation(resultFuture);
+        if (opCtx == null) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Adapter đã đóng, không thể tạo kết nối mới."));
+        }
+        final long attemptGeneration = opCtx.generation;
 
-        return CompletableFuture.supplyAsync(
+        submitCancellableWorker(
+                opCtx,
+                resultFuture,
                 () -> {
-                    if (!running.get() || activeGeneration.get() != attemptGeneration) {
-                        throw new CompletionException(
-                                new IllegalStateException("Yêu cầu kết nối đã bị thay thế bởi phiên mới hơn."));
-                    }
-                    try {
-                        TransferSession session =
-                                peerNode.connect(
-                                        new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS, IO_TIMEOUT_MS);
-                        ActiveSessionContext installedCtx;
-                        synchronized (sessionLock) {
-                            if (!running.get() || activeGeneration.get() != attemptGeneration) {
-                                closeQuietly(session);
-                                throw new IllegalStateException(
-                                        "Kết nối vừa hoàn tất nhưng đã bị thay thế bởi phiên mới hơn.");
+                            if (isOperationSuperseded(opCtx)) {
+                                cancelOperationIfNotCommitted(opCtx);
+                                resultFuture.cancel(false);
+                                return;
                             }
-                            SessionInfo info = session.info();
-                            installedCtx =
-                                    new ActiveSessionContext(
-                                            attemptGeneration,
-                                            info.sessionId().toString(),
-                                            host + ":" + port,
-                                            session,
-                                            false);
-                            this.activeContext = installedCtx;
-                            this.pendingIncomingOffer = null;
-                        }
+                            try {
+                                TransferSession session =
+                                        peerNode.connect(
+                                                new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS, IO_TIMEOUT_MS);
+                                ActiveSessionContext installedCtx = null;
+                                boolean supersededBeforeInstall = false;
+                                synchronized (sessionLock) {
+                                    if (isOperationSuperseded(opCtx)
+                                            || opCtx.phase != OperationPhase.PENDING) {
+                                        opCtx.phase = OperationPhase.CANCELLED;
+                                        clearOperationIfMatchesLocked(opCtx);
+                                        supersededBeforeInstall = true;
+                                    } else {
+                                        SessionInfo info = session.info();
+                                        installedCtx =
+                                                new ActiveSessionContext(
+                                                        attemptGeneration,
+                                                        info.sessionId().toString(),
+                                                        host + ":" + port,
+                                                        session,
+                                                        false,
+                                                        false);
+                                        opCtx.installedSession = installedCtx;
+                                        opCtx.phase = OperationPhase.INSTALLED;
+                                        this.activeContext = installedCtx;
+                                        this.pendingIncomingOffer = null;
+                                    }
+                                }
+                                if (supersededBeforeInstall) {
+                                    closeQuietly(session);
+                                    resultFuture.cancel(false);
+                                    return;
+                                }
 
-                        SessionViewModel vm =
-                                new SessionViewModel(
-                                        installedCtx.sessionId(),
-                                        installedCtx.remoteAddress(),
-                                        peerNode.localFingerprint(),
-                                        "",
-                                        false,
-                                        SessionState.WAITING_FOR_FINGERPRINT,
-                                        "",
-                                        installedCtx.generation());
-                        dispatchSessionUpdate(installedCtx.generation(), vm);
-                        return vm;
-                    } catch (IOException e) {
-                        SessionViewModel errVm =
-                                new SessionViewModel(
-                                        "",
-                                        host + ":" + port,
-                                        peerNode.localFingerprint(),
-                                        "",
-                                        false,
-                                        SessionState.ERROR,
-                                        "Kết nối TCP thất bại: " + e.getMessage(),
-                                        attemptGeneration);
-                        dispatchSessionUpdate(attemptGeneration, errVm);
-                        throw new CompletionException(e);
+                                SessionViewModel vm =
+                                        new SessionViewModel(
+                                                installedCtx.sessionId(),
+                                                installedCtx.remoteAddress(),
+                                                peerNode.localFingerprint(),
+                                                "",
+                                                false,
+                                                SessionState.WAITING_FOR_FINGERPRINT,
+                                                "",
+                                                installedCtx.generation());
+                                if (!commitInstalledOperation(opCtx, resultFuture, vm)) {
+                                    return;
+                                }
+                                dispatchSessionUpdate(installedCtx.generation(), vm);
+                            } catch (IOException | RuntimeException e) {
+                                SessionViewModel errVm =
+                                        new SessionViewModel(
+                                                "",
+                                                host + ":" + port,
+                                                peerNode.localFingerprint(),
+                                                "",
+                                                false,
+                                                SessionState.ERROR,
+                                                "Kết nối TCP thất bại: " + e.getMessage(),
+                                                attemptGeneration);
+                                failOperationExceptionally(opCtx, resultFuture, e, errVm);
+                            }
+                        });
+        return resultFuture;
+    }
+
+    @Override
+    public CompletableFuture<RelayTicketInfo> createRelaySession(String relayHost, int relayPort) {
+        if (!ValidationUtils.isValidHostOrIp(relayHost)) {
+            return CompletableFuture.failedFuture(
+                    new IllegalArgumentException("Địa chỉ Relay Server không hợp lệ: " + relayHost));
+        }
+        if (!ValidationUtils.isValidPort(relayPort)) {
+            return CompletableFuture.failedFuture(
+                    new IllegalArgumentException("Cổng Relay Server không hợp lệ: " + relayPort));
+        }
+        if (!running.get()) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Adapter đã đóng, không thể tạo mã ghép nối Relay."));
+        }
+
+        final String trimmedHost = relayHost.trim();
+        final String relayAddress = trimmedHost + ":" + relayPort;
+        CompletableFuture<RelayTicketInfo> resultFuture = new CompletableFuture<>();
+        PendingOperationContext opCtx = startCancellableOperation(resultFuture);
+        if (opCtx == null) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Adapter đã đóng, không thể tạo mã ghép nối Relay."));
+        }
+        final long attemptGeneration = opCtx.generation;
+
+        dispatchSessionUpdate(
+                attemptGeneration,
+                new SessionViewModel(
+                        "",
+                        "Relay (" + relayAddress + ")",
+                        peerNode.localFingerprint(),
+                        "",
+                        true,
+                        SessionState.RELAY_CONNECTING,
+                        "",
+                        attemptGeneration));
+
+        submitCancellableWorker(
+                opCtx,
+                resultFuture,
+                () -> {
+                            if (isOperationSuperseded(opCtx)) {
+                                cancelOperationIfNotCommitted(opCtx);
+                                resultFuture.cancel(false);
+                                return;
+                            }
+                            try {
+                                RelayClient.Pending ticket =
+                                        RelayClient.create(
+                                                new InetSocketAddress(trimmedHost, relayPort),
+                                                RELAY_CONTROL_TIMEOUT_MS);
+                                PendingRelayContext relayCtx = null;
+                                boolean supersededBeforeInstall = false;
+                                synchronized (sessionLock) {
+                                    if (isOperationSuperseded(opCtx)
+                                            || opCtx.phase != OperationPhase.PENDING) {
+                                        opCtx.phase = OperationPhase.CANCELLED;
+                                        clearOperationIfMatchesLocked(opCtx);
+                                        supersededBeforeInstall = true;
+                                    } else {
+                                        relayCtx =
+                                                new PendingRelayContext(attemptGeneration, relayAddress, ticket);
+                                        opCtx.installedRelayTicket = relayCtx;
+                                        opCtx.phase = OperationPhase.INSTALLED;
+                                        this.activeRelayTicket = relayCtx;
+                                    }
+                                }
+                                if (supersededBeforeInstall) {
+                                    closeQuietly(ticket);
+                                    resultFuture.cancel(false);
+                                    return;
+                                }
+
+                                RelayTicketInfo ticketInfo =
+                                        new RelayTicketInfo(
+                                                attemptGeneration, ticket.code(), ticket.ttlMillis(), relayAddress);
+                                if (!commitInstalledOperation(opCtx, resultFuture, ticketInfo)) {
+                                    return;
+                                }
+
+                                dispatchSessionUpdate(
+                                        attemptGeneration,
+                                        new SessionViewModel(
+                                                "",
+                                                "Relay (" + relayAddress + ")",
+                                                peerNode.localFingerprint(),
+                                                "",
+                                                true,
+                                                SessionState.WAITING_FOR_PEER,
+                                                "",
+                                                attemptGeneration));
+
+                                // Chỉ khởi chạy awaitPair sau khi COMMITTED (nếu bị disconnect/shutdown ngay sau commit thì dừng)
+                                if (isCurrentRelayContext(relayCtx)) {
+                                    final PendingRelayContext committedRelayCtx = relayCtx;
+                                    try {
+                                        Future<?> waiterTask =
+                                                workerPool.submit(() -> awaitRelayPair(committedRelayCtx));
+                                        committedRelayCtx.bindWaiter(waiterTask);
+                                    } catch (RejectedExecutionException rejected) {
+                                        closeRelayTicketIfMatches(committedRelayCtx);
+                                    }
+                                }
+                            } catch (IOException | RuntimeException e) {
+                                SessionViewModel errVm =
+                                        new SessionViewModel(
+                                                "",
+                                                "Relay (" + relayAddress + ")",
+                                                peerNode.localFingerprint(),
+                                                "",
+                                                true,
+                                                SessionState.ERROR,
+                                                "Không thể tạo mã ghép nối trên Relay: " + e.getMessage(),
+                                                attemptGeneration);
+                                failOperationExceptionally(opCtx, resultFuture, e, errVm);
+                            }
+                        });
+        return resultFuture;
+    }
+
+    private void awaitRelayPair(PendingRelayContext relayCtx) {
+        try {
+            Socket pairedSocket = relayCtx.ticket.awaitPair();
+            if (relayCtx.cancelled.get()
+                    || Thread.currentThread().isInterrupted()
+                    || !isCurrentRelayContext(relayCtx)) {
+                closeQuietly(pairedSocket);
+                return;
+            }
+
+            dispatchSessionUpdate(
+                    relayCtx.generation,
+                    new SessionViewModel(
+                            "",
+                            "Relay (" + relayCtx.relayAddress + ")",
+                            peerNode.localFingerprint(),
+                            "",
+                            true,
+                            SessionState.TCP_CONNECTED,
+                            "",
+                            relayCtx.generation));
+
+            // Chuyển hoàn toàn quyền sở hữu socket đã PAIRED cho PeerNode.attach với vai trò TLS SERVER (Receiver)
+            TransferSession session =
+                    peerNode.attach(pairedSocket, PeerNode.TlsRole.SERVER, IO_TIMEOUT_MS);
+
+            ActiveSessionContext installedCtx = null;
+            boolean supersededBeforeInstall = false;
+            synchronized (sessionLock) {
+                if (relayCtx.cancelled.get()
+                        || Thread.currentThread().isInterrupted()
+                        || !running.get()
+                        || activeGeneration.get() != relayCtx.generation) {
+                    supersededBeforeInstall = true;
+                } else {
+                    if (this.activeRelayTicket == relayCtx) {
+                        this.activeRelayTicket = null;
                     }
-                },
-                workerPool);
+                    SessionInfo info = session.info();
+                    installedCtx =
+                            new ActiveSessionContext(
+                                    relayCtx.generation,
+                                    info.sessionId().toString(),
+                                    "Relay (" + relayCtx.relayAddress + ")",
+                                    session,
+                                    true,
+                                    true);
+                    this.activeContext = installedCtx;
+                    this.pendingIncomingOffer = null;
+                }
+            }
+            if (supersededBeforeInstall) {
+                closeQuietly(session);
+                return;
+            }
+
+            dispatchSessionUpdate(
+                    installedCtx.generation(),
+                    new SessionViewModel(
+                            installedCtx.sessionId(),
+                            installedCtx.remoteAddress(),
+                            peerNode.localFingerprint(),
+                            "",
+                            true,
+                            SessionState.WAITING_FOR_FINGERPRINT,
+                            "",
+                            installedCtx.generation()));
+        } catch (IOException | RuntimeException e) {
+            boolean wasCancelled =
+                    relayCtx.cancelled.get()
+                            || Thread.currentThread().isInterrupted()
+                            || !isCurrentRelayContext(relayCtx);
+            closeRelayTicketIfMatches(relayCtx);
+            if (!wasCancelled) {
+                dispatchSessionUpdate(
+                        relayCtx.generation,
+                        new SessionViewModel(
+                                "",
+                                "Relay (" + relayCtx.relayAddress + ")",
+                                peerNode.localFingerprint(),
+                                "",
+                                true,
+                                SessionState.ERROR,
+                                "Ghép nối Relay không thành công hoặc đã hết hạn chờ: " + e.getMessage(),
+                                relayCtx.generation));
+            }
+        }
+    }
+
+    @Override
+    public CompletableFuture<SessionViewModel> joinRelaySession(
+            String relayHost, int relayPort, String pairingCode) {
+        if (!ValidationUtils.isValidHostOrIp(relayHost)) {
+            return CompletableFuture.failedFuture(
+                    new IllegalArgumentException("Địa chỉ Relay Server không hợp lệ: " + relayHost));
+        }
+        if (!ValidationUtils.isValidPort(relayPort)) {
+            return CompletableFuture.failedFuture(
+                    new IllegalArgumentException("Cổng Relay Server không hợp lệ: " + relayPort));
+        }
+        final String canonicalCode = ValidationUtils.canonicalizeRelayPairingCode(pairingCode);
+        if (canonicalCode.isEmpty()) {
+            return CompletableFuture.failedFuture(
+                    new IllegalArgumentException(
+                            "Mã ghép nối Relay không hợp lệ (phải đủ 12 ký tự chuẩn, không gồm 0/1/I/O)."));
+        }
+        if (!running.get()) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Adapter đã đóng, không thể kết nối Relay."));
+        }
+
+        final String trimmedHost = relayHost.trim();
+        final String relayAddress = trimmedHost + ":" + relayPort;
+        CompletableFuture<SessionViewModel> resultFuture = new CompletableFuture<>();
+        PendingOperationContext opCtx = startCancellableOperation(resultFuture);
+        if (opCtx == null) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Adapter đã đóng, không thể kết nối Relay."));
+        }
+        final long attemptGeneration = opCtx.generation;
+
+        dispatchSessionUpdate(
+                attemptGeneration,
+                new SessionViewModel(
+                        "",
+                        "Relay (" + relayAddress + ")",
+                        peerNode.localFingerprint(),
+                        "",
+                        true,
+                        SessionState.RELAY_CONNECTING,
+                        "",
+                        attemptGeneration));
+
+        submitCancellableWorker(
+                opCtx,
+                resultFuture,
+                () -> {
+                            if (isOperationSuperseded(opCtx)) {
+                                cancelOperationIfNotCommitted(opCtx);
+                                resultFuture.cancel(false);
+                                return;
+                            }
+                            try {
+                                Socket pairedSocket =
+                                        RelayClient.join(
+                                                new InetSocketAddress(trimmedHost, relayPort),
+                                                canonicalCode,
+                                                RELAY_CONTROL_TIMEOUT_MS);
+                                if (isOperationSuperseded(opCtx)) {
+                                    cancelOperationIfNotCommitted(opCtx);
+                                    closeQuietly(pairedSocket);
+                                    resultFuture.cancel(false);
+                                    return;
+                                }
+
+                                dispatchSessionUpdate(
+                                        attemptGeneration,
+                                        new SessionViewModel(
+                                                "",
+                                                "Relay (" + relayAddress + ")",
+                                                peerNode.localFingerprint(),
+                                                "",
+                                                true,
+                                                SessionState.TCP_CONNECTED,
+                                                "",
+                                                attemptGeneration));
+
+                                // Chuyển hoàn toàn quyền sở hữu socket đã PAIRED cho PeerNode.attach với vai trò TLS CLIENT (Sender)
+                                TransferSession session =
+                                        peerNode.attach(pairedSocket, PeerNode.TlsRole.CLIENT, IO_TIMEOUT_MS);
+
+                                ActiveSessionContext installedCtx = null;
+                                boolean supersededBeforeInstall = false;
+                                synchronized (sessionLock) {
+                                    if (isOperationSuperseded(opCtx)
+                                            || opCtx.phase != OperationPhase.PENDING) {
+                                        opCtx.phase = OperationPhase.CANCELLED;
+                                        clearOperationIfMatchesLocked(opCtx);
+                                        supersededBeforeInstall = true;
+                                    } else {
+                                        SessionInfo info = session.info();
+                                        installedCtx =
+                                                new ActiveSessionContext(
+                                                        attemptGeneration,
+                                                        info.sessionId().toString(),
+                                                        "Relay (" + relayAddress + ")",
+                                                        session,
+                                                        false,
+                                                        true);
+                                        opCtx.installedSession = installedCtx;
+                                        opCtx.phase = OperationPhase.INSTALLED;
+                                        this.activeContext = installedCtx;
+                                        this.pendingIncomingOffer = null;
+                                    }
+                                }
+                                if (supersededBeforeInstall) {
+                                    closeQuietly(session);
+                                    resultFuture.cancel(false);
+                                    return;
+                                }
+
+                                SessionViewModel vm =
+                                        new SessionViewModel(
+                                                installedCtx.sessionId(),
+                                                installedCtx.remoteAddress(),
+                                                peerNode.localFingerprint(),
+                                                "",
+                                                true,
+                                                SessionState.WAITING_FOR_FINGERPRINT,
+                                                "",
+                                                installedCtx.generation());
+                                if (!commitInstalledOperation(opCtx, resultFuture, vm)) {
+                                    return;
+                                }
+                                dispatchSessionUpdate(installedCtx.generation(), vm);
+                            } catch (IOException | RuntimeException e) {
+                                SessionViewModel errVm =
+                                        new SessionViewModel(
+                                                "",
+                                                "Relay (" + relayAddress + ")",
+                                                peerNode.localFingerprint(),
+                                                "",
+                                                true,
+                                                SessionState.ERROR,
+                                                "Kết nối Relay thất bại (mã không hợp lệ/hết hạn hoặc máy chủ không sẵn sàng): "
+                                                        + e.getMessage(),
+                                                attemptGeneration);
+                                failOperationExceptionally(opCtx, resultFuture, e, errVm);
+                            }
+                        });
+        return resultFuture;
     }
 
     @Override
     public CompletableFuture<SessionViewModel> connectRelay(String pairingCode) {
         return CompletableFuture.failedFuture(
                 new UnsupportedOperationException(
-                        "Tính năng kết nối qua Relay Server sẽ được tích hợp ở giai đoạn Relay UI tiếp theo."));
+                        "Vui lòng dùng joinRelaySession(relayHost, relayPort, pairingCode) để kết nối Relay thật."));
     }
 
     @Override
@@ -276,7 +812,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                     new IllegalStateException("Không tìm thấy phiên kết nối tương ứng ID: " + sessionId));
         }
 
-        return CompletableFuture.supplyAsync(
+        return supplyAsyncOnWorker(
                 () -> {
                     if (!isCurrentContext(ctx)) {
                         throw new CompletionException(
@@ -289,7 +825,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                     ctx.remoteAddress(),
                                     peerNode.localFingerprint(),
                                     canonicalPin,
-                                    false,
+                                    ctx.relay(),
                                     SessionState.TLS_HANDSHAKING,
                                     "",
                                     ctx.generation());
@@ -302,7 +838,6 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                             throw new IOException("Bắt tay TLS không đạt trạng thái VERIFIED.");
                         }
 
-                        // Phải kiểm tra lại generation sau khi verify xong: nếu phiên đã bị thay thế/ngắt, bỏ qua
                         if (!isCurrentContext(ctx)) {
                             closeQuietly(ctx.session());
                             throw new IllegalStateException(
@@ -315,7 +850,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                         ctx.remoteAddress(),
                                         peerNode.localFingerprint(),
                                         canonicalPin,
-                                        false,
+                                        ctx.relay(),
                                         SessionState.SECURE_READY,
                                         "",
                                         ctx.generation());
@@ -336,7 +871,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                             ctx.remoteAddress(),
                                             peerNode.localFingerprint(),
                                             canonicalPin,
-                                            false,
+                                            ctx.relay(),
                                             SessionState.ERROR,
                                             "Bắt tay TLS thất bại (Sai vân tay hoặc lỗi mạng): " + e.getMessage(),
                                             ctx.generation());
@@ -344,13 +879,13 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                         }
                         throw new CompletionException(e);
                     }
-                },
-                workerPool);
+                });
     }
 
     private void startWaitingForOfferLoop(ActiveSessionContext ctx) {
-        workerPool.submit(
-                () -> {
+        try {
+            workerPool.submit(
+                    () -> {
                     try {
                         FileOffer offer = ctx.session().receiveOffer();
                         synchronized (sessionLock) {
@@ -376,7 +911,6 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                         ctx.generation());
                         dispatchTransferUpdate(ctx.generation(), offerVm);
 
-                        // Kiểm tra lại generation ngay trên Swing EDT trước khi bật hộp thoại nhận tệp
                         SwingUtilities.invokeLater(
                                 () -> {
                                     if (!isCurrentContext(ctx)) {
@@ -410,6 +944,9 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                         }
                     }
                 });
+        } catch (RejectedExecutionException rejected) {
+            closeSessionIfMatches(ctx);
+        }
     }
 
     @Override
@@ -426,7 +963,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                             "Phiên chưa đạt trạng thái SECURE_READY, không được phép truyền dữ liệu."));
         }
 
-        return CompletableFuture.supplyAsync(
+        return supplyAsyncOnWorker(
                 () -> {
                     if (!isCurrentContext(ctx)
                             || ctx.session().info().state() != SessionInfo.State.VERIFIED) {
@@ -532,8 +1069,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                     } finally {
                         closeSessionIfMatches(ctx);
                     }
-                },
-                workerPool);
+                });
     }
 
     @Override
@@ -559,7 +1095,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                             "Không có yêu cầu truyền tệp phù hợp với phiên hiện hành và ID: " + transferId));
         }
 
-        return CompletableFuture.runAsync(
+        return runAsyncOnWorker(
                 () -> {
                     if (!isCurrentContext(ctx)) {
                         throw new IllegalStateException("Phiên nhận tệp đã bị thay thế.");
@@ -654,8 +1190,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                     } finally {
                         closeSessionIfMatches(ctx);
                     }
-                },
-                workerPool);
+                });
     }
 
     @Override
@@ -666,7 +1201,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
             ctx = this.activeContext;
             offerCtx = this.pendingIncomingOffer;
         }
-        return CompletableFuture.runAsync(
+        return runAsyncOnWorker(
                 () -> {
                     if (ctx == null || offerCtx == null || offerCtx.generation() != ctx.generation()) {
                         return;
@@ -696,8 +1231,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                             dispatchTransferUpdate(ctx.generation(), rejectedVm);
                         }
                     }
-                },
-                workerPool);
+                });
     }
 
     @Override
@@ -706,7 +1240,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
         if (ctx == null) {
             return CompletableFuture.completedFuture(null);
         }
-        return CompletableFuture.runAsync(
+        return runAsyncOnWorker(
                 () -> {
                     if (!isCurrentContext(ctx)) {
                         return;
@@ -733,8 +1267,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                     sId,
                                     gen);
                     dispatchTransferUpdate(gen, cancelledVm);
-                },
-                workerPool);
+                });
     }
 
     @Override
@@ -746,23 +1279,23 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
 
     @Override
     public CompletableFuture<Void> disconnect(String sessionId) {
-        return CompletableFuture.runAsync(
-                () -> {
-                    long newGen;
-                    synchronized (sessionLock) {
-                        if (sessionId != null
-                                && !sessionId.isBlank()
-                                && activeContext != null
-                                && !activeContext.sessionId().equals(sessionId)) {
-                            // Bỏ qua yêu cầu ngắt kết nối của phiên cũ không còn active
-                            return;
-                        }
-                        newGen = invalidateAndReserveGeneration();
-                    }
-                    SessionViewModel disconnected = SessionViewModel.createDisconnected(newGen);
-                    dispatchSessionUpdate(newGen, disconnected);
-                },
-                workerPool);
+        if (!running.get()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        // Tách và đăng ký theo dõi ngay dưới sessionLock (non-blocking, an toàn trên EDT)
+        DetachedResources detached = invalidateAndDetach(sessionId, false);
+        if (detached == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        cancelDetachedAsyncHandles(detached);
+
+        Runnable detachHook = this.onAfterDisconnectDetachedForTest;
+        if (detachHook != null) {
+            detachHook.run();
+        }
+
+        // Chạy cleanup trên cleanupPool độc lập (không phụ thuộc workerPool, có fallback nếu shutdown đã đóng)
+        return scheduleDetachedCleanupAsync(detached, true);
     }
 
     @Override
@@ -780,8 +1313,11 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
 
     @Override
     public void shutdown() {
-        running.set(false);
-        invalidateAndReserveGeneration();
+        DetachedResources detached = invalidateAndDetach(null, true);
+        if (detached != null) {
+            cancelDetachedAsyncHandles(detached);
+            closeDetachedIoSafely(detached);
+        }
         if (serverListener != null) {
             try {
                 serverListener.close();
@@ -794,26 +1330,396 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+        // Đóng ngay mọi tài nguyên đã được detach bởi disconnect()/cancel() đồng thời
+        drainPendingCleanups();
+
+        // Tắt cleanupPool theo chế độ graceful (không dùng shutdownNow) để không làm rơi tác vụ đang xếp hàng
+        cleanupPool.shutdown();
+        try {
+            cleanupPool.awaitTermination(2, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        // Quét lại lần cuối để đảm bảo không còn tài nguyên detach nào chưa đóng
+        drainPendingCleanups();
     }
 
     public boolean isShutdown() {
-        return !running.get() && workerPool.isShutdown();
+        return !running.get() && workerPool.isShutdown() && cleanupPool.isShutdown();
     }
 
-    private long invalidateAndReserveGeneration() {
-        TransferSession toClose = null;
-        long nextGen;
+    private PendingOperationContext startCancellableOperation(CompletableFuture<?> resultFuture) {
+        DetachedResources previous;
+        PendingOperationContext opCtx;
         synchronized (sessionLock) {
+            if (!running.get()) {
+                return null;
+            }
+            long nextGen = generationSequence.incrementAndGet();
+            activeGeneration.set(nextGen);
+            PendingOperationContext oldOp = this.activeOperation;
+            if (oldOp != null && oldOp.phase != OperationPhase.COMMITTED) {
+                oldOp.phase = OperationPhase.CANCELLED;
+            }
+            PendingRelayContext oldTicket = this.activeRelayTicket;
+            TransferSession oldSession =
+                    (this.activeContext != null) ? this.activeContext.session() : null;
+
+            this.activeContext = null;
+            this.activeRelayTicket = null;
+            this.pendingIncomingOffer = null;
+
+            opCtx = new PendingOperationContext(nextGen, resultFuture);
+            this.activeOperation = opCtx;
+            previous = detachAndTrackLocked(nextGen, oldOp, oldTicket, oldSession);
+        }
+
+        cancelDetachedAsyncHandles(previous);
+        closeDetachedIoSafely(previous);
+
+        resultFuture.whenComplete(
+                (res, err) -> {
+                    if (resultFuture.isCancelled()) {
+                        cancelOperationIfNotCommitted(opCtx);
+                    }
+                });
+        return opCtx;
+    }
+
+    private <T> CompletableFuture<T> supplyAsyncOnWorker(Supplier<T> supplier) {
+        try {
+            return CompletableFuture.supplyAsync(supplier, workerPool);
+        } catch (RejectedExecutionException rejected) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Adapter đã đóng.", rejected));
+        }
+    }
+
+    private CompletableFuture<Void> runAsyncOnWorker(Runnable action) {
+        try {
+            return CompletableFuture.runAsync(action, workerPool);
+        } catch (RejectedExecutionException rejected) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Adapter đã đóng.", rejected));
+        }
+    }
+
+    private <T> void submitCancellableWorker(
+            PendingOperationContext opCtx, CompletableFuture<T> resultFuture, Runnable task) {
+        try {
+            Future<?> workerTask = workerPool.submit(task);
+            opCtx.bindTask(workerTask);
+        } catch (RejectedExecutionException rejected) {
+            cancelOperationIfNotCommitted(opCtx);
+            resultFuture.completeExceptionally(
+                    new IllegalStateException("Adapter đã đóng, không thể khởi chạy thao tác mạng.", rejected));
+        }
+    }
+
+    /**
+     * Chuyển giao ownership từ trạng thái {@code INSTALLED} sang {@code COMMITTED} qua
+     * điểm tuyến tính hóa (linearization point) của {@code resultFuture.complete(value)}.
+     * Nếu {@code future.cancel(true)}, {@code disconnect()} hoặc {@code shutdown()} thắng race,
+     * mọi tài nguyên đã cài đặt cho {@code opCtx} được dọn dẹp idempotent ngoài {@code sessionLock}.
+     */
+    private <T> boolean commitInstalledOperation(
+            PendingOperationContext opCtx, CompletableFuture<T> resultFuture, T value) {
+        Runnable testHook = this.onAfterOperationInstalledForTest;
+        if (testHook != null) {
+            testHook.run();
+        }
+
+        DetachedResources preCancelDetach = null;
+        synchronized (sessionLock) {
+            if (opCtx.phase != OperationPhase.INSTALLED
+                    || !running.get()
+                    || activeGeneration.get() != opCtx.generation
+                    || resultFuture.isCancelled()) {
+                preCancelDetach = cancelOperationLocked(opCtx);
+            }
+        }
+        if (preCancelDetach != null) {
+            finishCancellationOutsideLock(preCancelDetach);
+            return false;
+        }
+
+        // Linearization point giữa complete(value) và future.cancel(true)
+        boolean wonFuture = resultFuture.complete(value);
+        if (!wonFuture) {
+            cancelOperationIfNotCommitted(opCtx);
+            return false;
+        }
+
+        DetachedResources concurrentCancelDetach = null;
+        synchronized (sessionLock) {
+            if (opCtx.phase == OperationPhase.INSTALLED
+                    && running.get()
+                    && activeGeneration.get() == opCtx.generation) {
+                opCtx.phase = OperationPhase.COMMITTED;
+                clearOperationIfMatchesLocked(opCtx);
+                return true;
+            }
+            concurrentCancelDetach = cancelOperationLocked(opCtx);
+        }
+        if (concurrentCancelDetach != null) {
+            finishCancellationOutsideLock(concurrentCancelDetach);
+        }
+        return false;
+    }
+
+    private <T> void failOperationExceptionally(
+            PendingOperationContext opCtx,
+            CompletableFuture<T> resultFuture,
+            Exception error,
+            SessionViewModel errorVm) {
+        boolean shouldReportError = false;
+        DetachedResources detached = null;
+        synchronized (sessionLock) {
+            if (opCtx.phase == OperationPhase.COMMITTED || opCtx.phase == OperationPhase.CANCELLED) {
+                return;
+            }
+            if (isOperationSuperseded(opCtx)) {
+                detached = cancelOperationLocked(opCtx);
+            } else {
+                opCtx.phase = OperationPhase.CANCELLED;
+                clearOperationIfMatchesLocked(opCtx);
+                PendingRelayContext ticketToClose = null;
+                TransferSession sessionToClose = null;
+                if (opCtx.installedRelayTicket != null
+                        && this.activeRelayTicket == opCtx.installedRelayTicket) {
+                    ticketToClose = this.activeRelayTicket;
+                    this.activeRelayTicket = null;
+                }
+                if (opCtx.installedSession != null && this.activeContext == opCtx.installedSession) {
+                    sessionToClose = this.activeContext.session();
+                    this.activeContext = null;
+                    this.pendingIncomingOffer = null;
+                }
+                if (ticketToClose != null || sessionToClose != null) {
+                    detached = detachAndTrackLocked(-1L, null, ticketToClose, sessionToClose);
+                }
+                shouldReportError = running.get() && activeGeneration.get() == opCtx.generation;
+            }
+        }
+
+        if (!shouldReportError) {
+            if (detached != null) {
+                finishCancellationOutsideLock(detached);
+            }
+            resultFuture.cancel(false);
+            return;
+        }
+
+        if (detached != null) {
+            closeDetachedIoSafely(detached);
+        }
+        if (errorVm != null) {
+            dispatchSessionUpdate(opCtx.generation, errorVm);
+        }
+        resultFuture.completeExceptionally(error);
+    }
+
+    private void cancelOperationIfNotCommitted(PendingOperationContext opCtx) {
+        DetachedResources detached;
+        synchronized (sessionLock) {
+            detached = cancelOperationLocked(opCtx);
+        }
+        if (detached != null) {
+            finishCancellationOutsideLock(detached);
+        }
+    }
+
+    private DetachedResources cancelOperationLocked(PendingOperationContext opCtx) {
+        if (opCtx.phase == OperationPhase.COMMITTED || opCtx.phase == OperationPhase.CANCELLED) {
+            return null;
+        }
+        opCtx.phase = OperationPhase.CANCELLED;
+
+        PendingRelayContext ticketToClose = null;
+        TransferSession sessionToClose = null;
+        long nextGen = -1L;
+
+        clearOperationIfMatchesLocked(opCtx);
+        if (opCtx.installedRelayTicket != null
+                && this.activeRelayTicket == opCtx.installedRelayTicket) {
+            ticketToClose = this.activeRelayTicket;
+            this.activeRelayTicket = null;
+        }
+        if (opCtx.installedSession != null && this.activeContext == opCtx.installedSession) {
+            sessionToClose = this.activeContext.session();
+            this.activeContext = null;
+            this.pendingIncomingOffer = null;
+        }
+        if (activeGeneration.get() == opCtx.generation) {
             nextGen = generationSequence.incrementAndGet();
             activeGeneration.set(nextGen);
-            if (activeContext != null) {
-                toClose = activeContext.session();
-                activeContext = null;
-            }
-            pendingIncomingOffer = null;
         }
-        closeQuietly(toClose);
-        return nextGen;
+        return detachAndTrackLocked(nextGen, opCtx, ticketToClose, sessionToClose);
+    }
+
+    private void finishCancellationOutsideLock(DetachedResources detached) {
+        cancelDetachedAsyncHandles(detached);
+        closeDetachedIoSafely(detached);
+        if (detached.nextGeneration > 0 && running.get()) {
+            dispatchSessionUpdate(
+                    detached.nextGeneration,
+                    SessionViewModel.createDisconnected(detached.nextGeneration));
+        }
+    }
+
+    private DetachedResources invalidateAndDetach(
+            String onlyIfMatchingSessionId, boolean markStopped) {
+        synchronized (sessionLock) {
+            if (markStopped) {
+                running.set(false);
+            }
+            if (onlyIfMatchingSessionId != null && !onlyIfMatchingSessionId.isBlank()) {
+                if (activeContext == null
+                        || !activeContext.sessionId().equals(onlyIfMatchingSessionId)) {
+                    return null;
+                }
+            }
+            long nextGen = generationSequence.incrementAndGet();
+            activeGeneration.set(nextGen);
+            PendingOperationContext oldOp = this.activeOperation;
+            if (oldOp != null && oldOp.phase != OperationPhase.COMMITTED) {
+                oldOp.phase = OperationPhase.CANCELLED;
+            }
+            PendingRelayContext oldTicket = this.activeRelayTicket;
+            TransferSession oldSession =
+                    (this.activeContext != null) ? this.activeContext.session() : null;
+
+            this.activeOperation = null;
+            this.activeRelayTicket = null;
+            this.activeContext = null;
+            this.pendingIncomingOffer = null;
+            return detachAndTrackLocked(nextGen, oldOp, oldTicket, oldSession);
+        }
+    }
+
+    /**
+     * Phải được gọi bên trong {@code synchronized (sessionLock)}: đăng ký ngay vào {@code pendingCleanups}
+     * trước khi nhả lock để {@code shutdown()} đồng thời luôn nhìn thấy và đóng được tài nguyên đã tách.
+     */
+    private DetachedResources detachAndTrackLocked(
+            long nextGen,
+            PendingOperationContext op,
+            PendingRelayContext ticket,
+            TransferSession session) {
+        DetachedResources detached = new DetachedResources(nextGen, op, ticket, session);
+        if (detached.hasCloseableIo()) {
+            pendingCleanups.add(detached);
+        }
+        return detached;
+    }
+
+    private static void cancelDetachedAsyncHandles(DetachedResources detached) {
+        if (detached.operationToCancel != null) {
+            detached.operationToCancel.cancelOperation();
+        }
+        if (detached.relayTicketToClose != null) {
+            detached.relayTicketToClose.cancelWaiter();
+        }
+    }
+
+    private void closeDetachedIoAndUnregister(DetachedResources detached) {
+        if (detached == null) {
+            return;
+        }
+        try {
+            detached.closeIoIdempotently();
+        } finally {
+            pendingCleanups.remove(detached);
+        }
+    }
+
+    /**
+     * Thực thi dọn dẹp tài nguyên đã tách trên {@code cleanupPool} độc lập với {@code workerPool}.
+     * Nếu {@code cleanupPool} đã bị tắt bởi {@code shutdown()} đồng thời ({@link RejectedExecutionException}),
+     * chuyển sang fallback Virtual Thread độc lập (và fallback cuối an toàn ngoài Swing EDT) để bảo đảm
+     * socket luôn được đóng idempotent và không bao giờ ném {@code RejectedExecutionException} ra caller.
+     */
+    private CompletableFuture<Void> scheduleDetachedCleanupAsync(
+            DetachedResources detached, boolean dispatchDisconnectedAfterClose) {
+        CompletableFuture<Void> done = new CompletableFuture<>();
+        Runnable cleanupTask =
+                () -> {
+                    try {
+                        closeDetachedIoAndUnregister(detached);
+                        if (dispatchDisconnectedAfterClose
+                                && detached.nextGeneration > 0
+                                && running.get()) {
+                            dispatchSessionUpdate(
+                                    detached.nextGeneration,
+                                    SessionViewModel.createDisconnected(detached.nextGeneration));
+                        }
+                    } finally {
+                        done.complete(null);
+                    }
+                };
+        try {
+            cleanupPool.execute(cleanupTask);
+        } catch (RejectedExecutionException rejected) {
+            runCleanupFallbackOffEdt(cleanupTask);
+        }
+        return done;
+    }
+
+    private void runCleanupFallbackOffEdt(Runnable cleanupTask) {
+        try {
+            Thread.ofVirtual().name("p2p-cleanup-fallback").start(cleanupTask);
+        } catch (Throwable virtualFailed) {
+            if (!SwingUtilities.isEventDispatchThread()) {
+                cleanupTask.run();
+                return;
+            }
+            try {
+                Thread daemon = new Thread(cleanupTask, "p2p-cleanup-fallback-platform");
+                daemon.setDaemon(true);
+                daemon.start();
+            } catch (Throwable platformFailed) {
+                // Giải pháp cuối nếu JVM không thể tạo bất kỳ luồng nào nữa
+                cleanupTask.run();
+            }
+        }
+    }
+
+    /**
+     * Đóng socket/ticket/session đã tách ngoài {@code sessionLock} và tuyệt đối không block Swing EDT.
+     */
+    private void closeDetachedIoSafely(DetachedResources detached) {
+        if (detached == null) {
+            return;
+        }
+        if (!detached.hasCloseableIo()) {
+            pendingCleanups.remove(detached);
+            return;
+        }
+        if (SwingUtilities.isEventDispatchThread()) {
+            scheduleDetachedCleanupAsync(detached, false);
+        } else {
+            closeDetachedIoAndUnregister(detached);
+        }
+    }
+
+    private void drainPendingCleanups() {
+        for (DetachedResources pending : pendingCleanups) {
+            closeDetachedIoSafely(pending);
+        }
+    }
+
+    private boolean isOperationSuperseded(PendingOperationContext opCtx) {
+        return opCtx.cancelled.get()
+                || opCtx.resultFuture.isCancelled()
+                || Thread.currentThread().isInterrupted()
+                || !running.get()
+                || activeGeneration.get() != opCtx.generation;
+    }
+
+    private void clearOperationIfMatchesLocked(PendingOperationContext opCtx) {
+        if (this.activeOperation == opCtx) {
+            this.activeOperation = null;
+        }
     }
 
     private ActiveSessionContext getCurrentContextIfMatches(String sessionId) {
@@ -836,6 +1742,14 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
         return current == ctx && activeGeneration.get() == ctx.generation();
     }
 
+    private boolean isCurrentRelayContext(PendingRelayContext relayCtx) {
+        if (relayCtx == null || !running.get()) {
+            return false;
+        }
+        PendingRelayContext current = this.activeRelayTicket;
+        return current == relayCtx && activeGeneration.get() == relayCtx.generation;
+    }
+
     private void closeSessionIfMatches(ActiveSessionContext ctx) {
         if (ctx == null) {
             return;
@@ -847,6 +1761,19 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
             }
         }
         closeQuietly(ctx.session());
+    }
+
+    private void closeRelayTicketIfMatches(PendingRelayContext relayCtx) {
+        if (relayCtx == null) {
+            return;
+        }
+        relayCtx.cancelWaiter();
+        synchronized (sessionLock) {
+            if (this.activeRelayTicket == relayCtx) {
+                this.activeRelayTicket = null;
+            }
+        }
+        closeQuietly(relayCtx.ticket);
     }
 
     private long closeAndAdvanceGenerationIfMatches(ActiveSessionContext ctx) {
@@ -866,11 +1793,11 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
         return nextGen;
     }
 
-    private static void closeQuietly(TransferSession session) {
-        if (session != null) {
+    private static void closeQuietly(AutoCloseable closeable) {
+        if (closeable != null) {
             try {
-                session.close();
-            } catch (IOException ignored) {
+                closeable.close();
+            } catch (Exception ignored) {
             }
         }
     }
@@ -887,7 +1814,6 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
         }
         SwingUtilities.invokeLater(
                 () -> {
-                    // Kiểm tra lại generation ngay lúc callback thực sự chạy trên Swing EDT
                     if (!running.get() || activeGeneration.get() != generation) {
                         return;
                     }
@@ -913,7 +1839,6 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
         }
         SwingUtilities.invokeLater(
                 () -> {
-                    // Kiểm tra lại generation ngay lúc callback thực sự chạy trên Swing EDT
                     if (!running.get() || activeGeneration.get() != generation) {
                         return;
                     }

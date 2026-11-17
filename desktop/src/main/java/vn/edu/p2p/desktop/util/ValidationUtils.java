@@ -18,8 +18,12 @@ public final class ValidationUtils {
     // Regex kiểm tra Hostname theo RFC 1123 (nhãn 1-63 ký tự, không bắt đầu/kết thúc bằng dấu gạch ngang)
     private static final Pattern HOSTNAME_LABEL_PATTERN = Pattern.compile("^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$");
 
-    // Regex kiểm tra mã ghép nối Relay (Pairing Code): 6-12 ký tự chữ/số, hoặc dạng 3-6 ký tự có dấu gạch ngang
+    // Regex kiểm tra mã ghép nối Relay (Pairing Code) tương thích ngược UI-02
     private static final Pattern PAIRING_CODE_PATTERN = Pattern.compile("^[a-zA-Z0-9]{6,12}$|^[a-zA-Z0-9]{3,6}-[a-zA-Z0-9]{3,6}$");
+
+    // Chuẩn mã ghép nối thực tế của giao thức Relay M6 (RelayProtocol): đúng 12 ký tự từ bảng 32 ký tự không gây nhầm lẫn
+    public static final int RELAY_CODE_LENGTH = 12;
+    public static final String RELAY_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
     // Regex kiểm tra SHA-256 fingerprint: đủ 64 ký tự hex hoặc 32 cặp hex phân tách bằng dấu hai chấm (32 bytes)
     private static final Pattern FINGERPRINT_HEX_PATTERN = Pattern.compile("^[0-9a-fA-F]{64}$");
@@ -113,6 +117,35 @@ public final class ValidationUtils {
             return false;
         }
         return PAIRING_CODE_PATTERN.matcher(trimmed).matches();
+    }
+
+    /**
+     * Kiểm tra mã ghép nối Relay thực tế theo đặc tả M6 (đúng 12 ký tự từ bảng ABCDEFGHJKLMNPQRSTUVWXYZ23456789).
+     */
+    public static boolean isValidRelayPairingCode(String code) {
+        if (code == null) {
+            return false;
+        }
+        String normalized = code.strip().toUpperCase(java.util.Locale.ROOT);
+        if (normalized.length() != RELAY_CODE_LENGTH) {
+            return false;
+        }
+        for (int i = 0; i < normalized.length(); i++) {
+            if (RELAY_CODE_ALPHABET.indexOf(normalized.charAt(i)) < 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Chuẩn hóa mã ghép nối Relay M6 sang chữ hoa 12 ký tự. Trả về chuỗi rỗng nếu không hợp lệ.
+     */
+    public static String canonicalizeRelayPairingCode(String code) {
+        if (!isValidRelayPairingCode(code)) {
+            return "";
+        }
+        return code.strip().toUpperCase(java.util.Locale.ROOT);
     }
 
     /**
