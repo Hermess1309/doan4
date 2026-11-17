@@ -1,5 +1,6 @@
 package vn.edu.p2p.desktop.adapter;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -21,6 +22,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.swing.SwingUtilities;
 import org.junit.jupiter.api.AfterEach;
@@ -750,6 +752,402 @@ class RelayCancellationRegressionTest {
         } finally {
             releaseCommitLatch.countDown();
             senderAdapter.setOnAfterOperationInstalledForTest(null);
+        }
+    }
+
+    @Test
+    void testDisconnectPausedInWhenCompleteWhileShutdownClosesExecutorsStillClosesSocketWithin750ms()
+            throws Exception {
+        CountDownLatch installedLatch = new CountDownLatch(1);
+        CountDownLatch releaseJoinWorkerLatch = new CountDownLatch(1);
+        CountDownLatch inWhenCompleteLatch = new CountDownLatch(1);
+        CountDownLatch releaseWhenCompleteLatch = new CountDownLatch(1);
+        AtomicBoolean secureReadyObserved = new AtomicBoolean(false);
+
+        senderAdapter.registerListeners(
+                vm -> {
+                    if (vm.state() == SessionState.SECURE_READY) {
+                        secureReadyObserved.set(true);
+                    }
+                },
+                null);
+        senderAdapter.setOnAfterOperationInstalledForTest(
+                () -> {
+                    installedLatch.countDown();
+                    try {
+                        releaseJoinWorkerLatch.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+
+        try (ServerSocket controlledServer =
+                new ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"))) {
+            CompletableFuture<Socket> acceptedRef = acceptAsync(controlledServer);
+            CompletableFuture<SessionViewModel> joinFuture =
+                    senderAdapter.joinRelaySession(
+                            "127.0.0.1", controlledServer.getLocalPort(), "ABCDEFGH2345");
+
+            // Mô phỏng chính xác kịch bản Codex CompletionWindowProbe.shutdownDuringDisconnect:
+            // callback đồng bộ chặn luồng disconnect() ngay sau khi invalidateAndDetach() chạy
+            joinFuture.whenComplete(
+                    (res, err) -> {
+                        if (joinFuture.isCancelled()) {
+                            inWhenCompleteLatch.countDown();
+                            try {
+                                releaseWhenCompleteLatch.await(5, TimeUnit.SECONDS);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            }
+                        }
+                    });
+
+            try (Socket serverSock = acceptedRef.get(5, TimeUnit.SECONDS)) {
+                assertEquals(17, serverSock.getInputStream().readNBytes(17).length);
+                DataOutputStream out = new DataOutputStream(serverSock.getOutputStream());
+                out.writeInt(RELAY_MAGIC);
+                out.writeByte(RELAY_STATUS_PAIRED);
+                out.flush();
+
+                assertTrue(installedLatch.await(5, TimeUnit.SECONDS));
+
+                CompletableFuture<CompletableFuture<Void>> disconnectCall =
+                        CompletableFuture.supplyAsync(() -> senderAdapter.disconnect(null));
+
+                assertTrue(
+                        inWhenCompleteLatch.await(5, TimeUnit.SECONDS),
+                        "disconnect() phải kích hoạt callback hủy joinFuture sau khi detach");
+
+                // Thả worker JOIN và gọi shutdown() đóng cả workerPool lẫn cleanupPool
+                releaseJoinWorkerLatch.countDown();
+                long startNanos = System.nanoTime();
+                senderAdapter.shutdown();
+                assertTrue(senderAdapter.isShutdown());
+
+                // Ngay cả trước khi callback disconnect() được thả, shutdown() đã đóng socket thật trong <= 750ms
+                assertSocketClosedWithin(serverSock, startNanos, CANCEL_DEADLINE_MS);
+
+                // Thả callback disconnect(): không được ném RejectedExecutionException
+                releaseWhenCompleteLatch.countDown();
+                CompletableFuture<Void> disconnectFuture = disconnectCall.get(5, TimeUnit.SECONDS);
+                assertDoesNotThrow(() -> disconnectFuture.get(5, TimeUnit.SECONDS));
+                assertTrue(joinFuture.isCancelled());
+                flushEdt();
+                assertFalse(
+                        secureReadyObserved.get(),
+                        "Không bao giờ được phát callback SECURE_READY sau shutdown");
+            }
+        } finally {
+            releaseJoinWorkerLatch.countDown();
+            releaseWhenCompleteLatch.countDown();
+            senderAdapter.setOnAfterOperationInstalledForTest(null);
+        }
+    }
+
+    @Test
+    void testDisconnectDetachesCommittedSessionThenShutdownClosesExecutorsBeforeCleanupSubmit()
+            throws Exception {
+        CountDownLatch detachedLatch = new CountDownLatch(1);
+        CountDownLatch releaseDisconnectLatch = new CountDownLatch(1);
+        AtomicBoolean secureReadyAfterShutdown = new AtomicBoolean(false);
+
+        senderAdapter.registerListeners(
+                vm -> {
+                    if (vm.state() == SessionState.SECURE_READY) {
+                        secureReadyAfterShutdown.set(true);
+                    }
+                },
+                null);
+
+        try (ServerSocket controlledServer =
+                new ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"))) {
+            CompletableFuture<Socket> acceptedRef = acceptAsync(controlledServer);
+            CompletableFuture<SessionViewModel> joinFuture =
+                    senderAdapter.joinRelaySession(
+                            "127.0.0.1", controlledServer.getLocalPort(), "ABCDEFGH2345");
+
+            try (Socket serverSock = acceptedRef.get(5, TimeUnit.SECONDS)) {
+                assertEquals(17, serverSock.getInputStream().readNBytes(17).length);
+                DataOutputStream out = new DataOutputStream(serverSock.getOutputStream());
+                out.writeInt(RELAY_MAGIC);
+                out.writeByte(RELAY_STATUS_PAIRED);
+                out.flush();
+
+                SessionViewModel committedVm = joinFuture.get(5, TimeUnit.SECONDS);
+                assertNotNull(committedVm);
+
+                senderAdapter.setOnAfterDisconnectDetachedForTest(
+                        () -> {
+                            detachedLatch.countDown();
+                            try {
+                                releaseDisconnectLatch.await(5, TimeUnit.SECONDS);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            }
+                        });
+
+                CompletableFuture<CompletableFuture<Void>> disconnectCall =
+                        CompletableFuture.supplyAsync(() -> senderAdapter.disconnect(committedVm.sessionId()));
+
+                assertTrue(
+                        detachedLatch.await(5, TimeUnit.SECONDS),
+                        "disconnect() phải tách xong tài nguyên trước khi shutdown()");
+
+                long startNanos = System.nanoTime();
+                senderAdapter.shutdown();
+                assertTrue(senderAdapter.isShutdown());
+
+                // Thả disconnect() sau khi executor đã shutdown hoàn toàn
+                releaseDisconnectLatch.countDown();
+                CompletableFuture<Void> disconnectFuture = disconnectCall.get(5, TimeUnit.SECONDS);
+                assertDoesNotThrow(() -> disconnectFuture.get(5, TimeUnit.SECONDS));
+
+                assertSocketClosedWithin(serverSock, startNanos, CANCEL_DEADLINE_MS);
+                flushEdt();
+                assertFalse(secureReadyAfterShutdown.get());
+            }
+        } finally {
+            releaseDisconnectLatch.countDown();
+            senderAdapter.setOnAfterDisconnectDetachedForTest(null);
+        }
+    }
+
+    @Test
+    void testRepeatedShutdownAndConcurrentDisconnectShutdownAreIdempotentWithoutRejection()
+            throws Exception {
+        try (ServerSocket silentCreateServer =
+                        new ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"));
+                ServerSocket pairedJoinServer =
+                        new ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"))) {
+            CompletableFuture<Socket> createAccept = acceptAsync(silentCreateServer);
+            CompletableFuture<Socket> joinAccept = acceptAsync(pairedJoinServer);
+
+            CompletableFuture<RelayTicketInfo> createFuture =
+                    receiverAdapter.createRelaySession("127.0.0.1", silentCreateServer.getLocalPort());
+            CompletableFuture<SessionViewModel> joinFuture =
+                    senderAdapter.joinRelaySession(
+                            "127.0.0.1", pairedJoinServer.getLocalPort(), "ABCDEFGH2345");
+
+            try (Socket createSock = createAccept.get(5, TimeUnit.SECONDS);
+                    Socket joinSock = joinAccept.get(5, TimeUnit.SECONDS)) {
+                assertEquals(5, createSock.getInputStream().readNBytes(5).length);
+                assertEquals(17, joinSock.getInputStream().readNBytes(17).length);
+                DataOutputStream out = new DataOutputStream(joinSock.getOutputStream());
+                out.writeInt(RELAY_MAGIC);
+                out.writeByte(RELAY_STATUS_PAIRED);
+                out.flush();
+
+                SessionViewModel committedJoin = joinFuture.get(5, TimeUnit.SECONDS);
+                assertNotNull(committedJoin);
+
+                long startNanos = System.nanoTime();
+                CompletableFuture<Void> d1 =
+                        CompletableFuture.runAsync(() -> receiverAdapter.disconnect(null).join());
+                CompletableFuture<Void> d2 =
+                        CompletableFuture.runAsync(
+                                () -> senderAdapter.disconnect(committedJoin.sessionId()).join());
+                CompletableFuture<Void> s1 = CompletableFuture.runAsync(receiverAdapter::shutdown);
+                CompletableFuture<Void> s2 = CompletableFuture.runAsync(senderAdapter::shutdown);
+
+                CompletableFuture.allOf(d1, d2, s1, s2).get(5, TimeUnit.SECONDS);
+
+                // Gọi shutdown() lặp lại nhiều lần phải hoàn toàn idempotent
+                assertDoesNotThrow(
+                        () -> {
+                            receiverAdapter.shutdown();
+                            receiverAdapter.shutdown();
+                            senderAdapter.shutdown();
+                            senderAdapter.shutdown();
+                        });
+                assertTrue(receiverAdapter.isShutdown());
+                assertTrue(senderAdapter.isShutdown());
+                assertTrue(createFuture.isDone());
+
+                assertSocketClosedWithin(createSock, startNanos, CANCEL_DEADLINE_MS);
+                assertSocketClosedWithin(joinSock, startNanos, CANCEL_DEADLINE_MS);
+            }
+        }
+    }
+
+    @Test
+    void testConcurrentCancelAndShutdownAcrossPendingInstalledAndCommittedPhases()
+            throws Exception {
+        // 1. PENDING phase: cancel(true) + shutdown() đồng thời khi server im lặng
+        try (ServerSocket silentServer =
+                new ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"))) {
+            CompletableFuture<Socket> acceptedRef = acceptAsync(silentServer);
+            CompletableFuture<RelayTicketInfo> createFuture =
+                    receiverAdapter.createRelaySession("127.0.0.1", silentServer.getLocalPort());
+            try (Socket serverSock = acceptedRef.get(5, TimeUnit.SECONDS)) {
+                assertEquals(5, serverSock.getInputStream().readNBytes(5).length);
+                long startNanos = System.nanoTime();
+                CompletableFuture<Void> cancelTask =
+                        CompletableFuture.runAsync(() -> createFuture.cancel(true));
+                CompletableFuture<Void> shutdownTask =
+                        CompletableFuture.runAsync(receiverAdapter::shutdown);
+                CompletableFuture.allOf(cancelTask, shutdownTask).get(5, TimeUnit.SECONDS);
+                assertSocketClosedWithin(serverSock, startNanos, CANCEL_DEADLINE_MS);
+                assertTrue(createFuture.isDone());
+            }
+        }
+
+        // 2. COMMITTED phase: cancel(true) + shutdown() đồng thời sau khi JOIN đã COMMITTED
+        try (ServerSocket pairedServer =
+                new ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"))) {
+            CompletableFuture<Socket> acceptedRef = acceptAsync(pairedServer);
+            CompletableFuture<SessionViewModel> joinFuture =
+                    senderAdapter.joinRelaySession(
+                            "127.0.0.1", pairedServer.getLocalPort(), "ABCDEFGH2345");
+            try (Socket serverSock = acceptedRef.get(5, TimeUnit.SECONDS)) {
+                assertEquals(17, serverSock.getInputStream().readNBytes(17).length);
+                DataOutputStream out = new DataOutputStream(serverSock.getOutputStream());
+                out.writeInt(RELAY_MAGIC);
+                out.writeByte(RELAY_STATUS_PAIRED);
+                out.flush();
+
+                SessionViewModel committed = joinFuture.get(5, TimeUnit.SECONDS);
+                assertNotNull(committed);
+
+                long startNanos = System.nanoTime();
+                CompletableFuture<Void> cancelTask =
+                        CompletableFuture.runAsync(() -> joinFuture.cancel(true));
+                CompletableFuture<Void> shutdownTask =
+                        CompletableFuture.runAsync(senderAdapter::shutdown);
+                CompletableFuture.allOf(cancelTask, shutdownTask).get(5, TimeUnit.SECONDS);
+                assertSocketClosedWithin(serverSock, startNanos, CANCEL_DEADLINE_MS);
+                assertTrue(senderAdapter.isShutdown());
+            }
+        }
+    }
+
+    @Test
+    void testCleanupOnSwingEdtDuringConcurrentDisconnectAndShutdownDoesNotBlockEdt()
+            throws Exception {
+        try (ServerSocket pairedServer =
+                new ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"))) {
+            CompletableFuture<Socket> acceptedRef = acceptAsync(pairedServer);
+            CompletableFuture<SessionViewModel> joinFuture =
+                    senderAdapter.joinRelaySession(
+                            "127.0.0.1", pairedServer.getLocalPort(), "ABCDEFGH2345");
+
+            try (Socket serverSock = acceptedRef.get(5, TimeUnit.SECONDS)) {
+                assertEquals(17, serverSock.getInputStream().readNBytes(17).length);
+                DataOutputStream out = new DataOutputStream(serverSock.getOutputStream());
+                out.writeInt(RELAY_MAGIC);
+                out.writeByte(RELAY_STATUS_PAIRED);
+                out.flush();
+
+                SessionViewModel committed = joinFuture.get(5, TimeUnit.SECONDS);
+                assertNotNull(committed);
+
+                AtomicReference<CompletableFuture<Void>> disconnectFutureRef = new AtomicReference<>();
+                long startNanos = System.nanoTime();
+                CompletableFuture<Void> shutdownAsync =
+                        CompletableFuture.runAsync(senderAdapter::shutdown);
+                long edtStartNanos = System.nanoTime();
+                SwingUtilities.invokeAndWait(
+                        () -> disconnectFutureRef.set(senderAdapter.disconnect(committed.sessionId())));
+                long edtElapsedMs = (System.nanoTime() - edtStartNanos) / 1_000_000L;
+
+                assertTrue(
+                        edtElapsedMs < 250,
+                        "disconnect() trên Swing EDT không được block (thực tế: " + edtElapsedMs + "ms)");
+                shutdownAsync.get(5, TimeUnit.SECONDS);
+                assertDoesNotThrow(() -> disconnectFutureRef.get().get(5, TimeUnit.SECONDS));
+                assertSocketClosedWithin(serverSock, startNanos, CANCEL_DEADLINE_MS);
+            }
+        }
+    }
+
+    @Test
+    void testDelayedCleanupOfSessionADoesNotCloseReplacementSessionB() throws Exception {
+        CountDownLatch detachedALatch = new CountDownLatch(1);
+        CountDownLatch releaseCleanupALatch = new CountDownLatch(1);
+
+        try (ServerSocket fakeServerA =
+                new ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"))) {
+            CompletableFuture<Socket> acceptedARef = acceptAsync(fakeServerA);
+            CompletableFuture<SessionViewModel> joinA =
+                    senderAdapter.joinRelaySession(
+                            "127.0.0.1", fakeServerA.getLocalPort(), "ABCDEFGH2345");
+
+            try (Socket sockA = acceptedARef.get(5, TimeUnit.SECONDS)) {
+                assertEquals(17, sockA.getInputStream().readNBytes(17).length);
+                DataOutputStream outA = new DataOutputStream(sockA.getOutputStream());
+                outA.writeInt(RELAY_MAGIC);
+                outA.writeByte(RELAY_STATUS_PAIRED);
+                outA.flush();
+
+                SessionViewModel sessionA = joinA.get(5, TimeUnit.SECONDS);
+                assertNotNull(sessionA);
+
+                // Tạm dừng luồng disconnect(sessionA) ngay sau khi detach để Session B kịp tạo trước khi cleanup A chạy
+                senderAdapter.setOnAfterDisconnectDetachedForTest(
+                        () -> {
+                            senderAdapter.setOnAfterDisconnectDetachedForTest(null);
+                            detachedALatch.countDown();
+                            try {
+                                releaseCleanupALatch.await(5, TimeUnit.SECONDS);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            }
+                        });
+
+                CompletableFuture<CompletableFuture<Void>> disconnectACall =
+                        CompletableFuture.supplyAsync(() -> senderAdapter.disconnect(sessionA.sessionId()));
+                assertTrue(detachedALatch.await(5, TimeUnit.SECONDS));
+
+                // Lập tức thiết lập Session B thật qua RelayServer + mutual TLS 1.3
+                RelayConfig config = new RelayConfig(16, 8, 5000, 60000, 60000, 900000, 100);
+                try (RelayServer realRelay =
+                        new RelayServer(new InetSocketAddress("127.0.0.1", 0), config)) {
+                    AtomicReference<SessionViewModel> receiverSessionBRef = new AtomicReference<>();
+                    CountDownLatch receiverWaitingFp = new CountDownLatch(1);
+                    receiverAdapter.registerListeners(
+                            vm -> {
+                                if (vm.state() == SessionState.WAITING_FOR_FINGERPRINT
+                                        && !vm.sessionId().isBlank()) {
+                                    receiverSessionBRef.set(vm);
+                                    receiverWaitingFp.countDown();
+                                }
+                            },
+                            null);
+
+                    RelayTicketInfo ticketB =
+                            receiverAdapter
+                                    .createRelaySession("127.0.0.1", realRelay.port())
+                                    .get(5, TimeUnit.SECONDS);
+                    SessionViewModel senderSessionB =
+                            senderAdapter
+                                    .joinRelaySession("127.0.0.1", realRelay.port(), ticketB.pairingCode())
+                                    .get(5, TimeUnit.SECONDS);
+                    assertTrue(receiverWaitingFp.await(5, TimeUnit.SECONDS));
+
+                    // Thả cleanup trễ của Session A ngay lúc Session B đang chuẩn bị bắt tay TLS
+                    long startCloseANanos = System.nanoTime();
+                    releaseCleanupALatch.countDown();
+                    disconnectACall.get(5, TimeUnit.SECONDS).get(5, TimeUnit.SECONDS);
+
+                    // Socket Session A đóng trong <= 750ms
+                    assertSocketClosedWithin(sockA, startCloseANanos, CANCEL_DEADLINE_MS);
+
+                    // Session B vẫn nguyên vẹn và bắt tay mutual TLS 1.3 đạt SECURE_READY thành công
+                    CompletableFuture<SessionViewModel> receiverHandshake =
+                            receiverAdapter.startTlsHandshake(
+                                    receiverSessionBRef.get().sessionId(), senderAdapter.getLocalFingerprint());
+                    CompletableFuture<SessionViewModel> senderHandshake =
+                            senderAdapter.startTlsHandshake(
+                                    senderSessionB.sessionId(), receiverAdapter.getLocalFingerprint());
+
+                    assertEquals(
+                            SessionState.SECURE_READY, receiverHandshake.get(10, TimeUnit.SECONDS).state());
+                    assertEquals(
+                            SessionState.SECURE_READY, senderHandshake.get(10, TimeUnit.SECONDS).state());
+                }
+            }
+        } finally {
+            releaseCleanupALatch.countDown();
+            senderAdapter.setOnAfterDisconnectDetachedForTest(null);
         }
     }
 

@@ -8,18 +8,22 @@ import java.net.SocketTimeoutException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import javax.swing.SwingUtilities;
 import vn.edu.p2p.core.FileOffer;
 import vn.edu.p2p.core.PeerListener;
@@ -152,17 +156,54 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
         }
     }
 
-    private record DetachedResources(
-            long nextGeneration,
-            PendingOperationContext operationToCancel,
-            PendingRelayContext relayTicketToClose,
-            TransferSession sessionToClose) {}
+    /**
+     * Tài nguyên đã được tách khỏi trạng thái hoạt động của adapter dưới {@code sessionLock}.
+     * Mỗi thực thể giữ đúng tham chiếu ticket/session của phiên đó (không bao giờ đóng nhầm phiên khác)
+     * và đảm bảo đóng I/O tối đa một lần (idempotent) ngay cả khi nhiều luồng ({@code disconnect},
+     * {@code cancel}, {@code shutdown}) cùng tiến hành dọn dẹp đồng thời.
+     */
+    private static final class DetachedResources {
+        final long nextGeneration;
+        final PendingOperationContext operationToCancel;
+        final PendingRelayContext relayTicketToClose;
+        final TransferSession sessionToClose;
+        private final AtomicBoolean ioClosed = new AtomicBoolean(false);
+
+        DetachedResources(
+                long nextGeneration,
+                PendingOperationContext operationToCancel,
+                PendingRelayContext relayTicketToClose,
+                TransferSession sessionToClose) {
+            this.nextGeneration = nextGeneration;
+            this.operationToCancel = operationToCancel;
+            this.relayTicketToClose = relayTicketToClose;
+            this.sessionToClose = sessionToClose;
+        }
+
+        boolean hasCloseableIo() {
+            return relayTicketToClose != null || sessionToClose != null;
+        }
+
+        void closeIoIdempotently() {
+            if (!hasCloseableIo()) {
+                return;
+            }
+            if (ioClosed.compareAndSet(false, true)) {
+                if (relayTicketToClose != null) {
+                    closeQuietly(relayTicketToClose.ticket);
+                }
+                closeQuietly(sessionToClose);
+            }
+        }
+    }
 
     private record PendingOfferContext(long generation, String sessionId, FileOffer offer) {}
 
     private final PeerNode peerNode;
     private final PeerListener serverListener;
     private final ExecutorService workerPool;
+    private final ExecutorService cleanupPool;
+    private final Set<DetachedResources> pendingCleanups = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean running = new AtomicBoolean(true);
 
     private final Object sessionLock = new Object();
@@ -183,10 +224,12 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
 
     private volatile BiConsumer<FileOffer, Consumer<File>> incomingOfferHandler;
     private volatile Runnable onAfterOperationInstalledForTest;
+    private volatile Runnable onAfterDisconnectDetachedForTest;
 
     public RealCoreApiAdapter(PeerNode peerNode, int preferredPort) throws IOException {
         this.peerNode = Objects.requireNonNull(peerNode, "peerNode không được null");
         this.workerPool = Executors.newVirtualThreadPerTaskExecutor();
+        this.cleanupPool = Executors.newVirtualThreadPerTaskExecutor();
 
         PeerListener listener = null;
         if (preferredPort >= 0) {
@@ -223,6 +266,10 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
         this.onAfterOperationInstalledForTest = hook;
     }
 
+    void setOnAfterDisconnectDetachedForTest(Runnable hook) {
+        this.onAfterDisconnectDetachedForTest = hook;
+    }
+
     @Override
     public String getLocalFingerprint() {
         return peerNode.localFingerprint();
@@ -256,23 +303,27 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
     }
 
     private void handleIncomingSession(TransferSession acceptedSession) {
-        ActiveSessionContext newCtx;
+        ActiveSessionContext newCtx = null;
         synchronized (sessionLock) {
             if (!running.get()
                     || activeContext != null
                     || activeRelayTicket != null
                     || activeOperation != null) {
-                closeQuietly(acceptedSession);
-                return;
+                newCtx = null;
+            } else {
+                long gen = generationSequence.incrementAndGet();
+                SessionInfo info = acceptedSession.info();
+                newCtx =
+                        new ActiveSessionContext(
+                                gen, info.sessionId().toString(), "Peer từ mạng LAN", acceptedSession, true, false);
+                this.activeContext = newCtx;
+                this.pendingIncomingOffer = null;
+                this.activeGeneration.set(gen);
             }
-            long gen = generationSequence.incrementAndGet();
-            SessionInfo info = acceptedSession.info();
-            newCtx =
-                    new ActiveSessionContext(
-                            gen, info.sessionId().toString(), "Peer từ mạng LAN", acceptedSession, true, false);
-            this.activeContext = newCtx;
-            this.pendingIncomingOffer = null;
-            this.activeGeneration.set(gen);
+        }
+        if (newCtx == null) {
+            closeQuietly(acceptedSession);
+            return;
         }
 
         SessionViewModel vm =
@@ -305,11 +356,16 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
 
         CompletableFuture<SessionViewModel> resultFuture = new CompletableFuture<>();
         PendingOperationContext opCtx = startCancellableOperation(resultFuture);
+        if (opCtx == null) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Adapter đã đóng, không thể tạo kết nối mới."));
+        }
         final long attemptGeneration = opCtx.generation;
 
-        Future<?> workerTask =
-                workerPool.submit(
-                        () -> {
+        submitCancellableWorker(
+                opCtx,
+                resultFuture,
+                () -> {
                             if (isOperationSuperseded(opCtx)) {
                                 cancelOperationIfNotCommitted(opCtx);
                                 resultFuture.cancel(false);
@@ -377,7 +433,6 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                 failOperationExceptionally(opCtx, resultFuture, e, errVm);
                             }
                         });
-        opCtx.bindTask(workerTask);
         return resultFuture;
     }
 
@@ -400,6 +455,10 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
         final String relayAddress = trimmedHost + ":" + relayPort;
         CompletableFuture<RelayTicketInfo> resultFuture = new CompletableFuture<>();
         PendingOperationContext opCtx = startCancellableOperation(resultFuture);
+        if (opCtx == null) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Adapter đã đóng, không thể tạo mã ghép nối Relay."));
+        }
         final long attemptGeneration = opCtx.generation;
 
         dispatchSessionUpdate(
@@ -414,9 +473,10 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                         "",
                         attemptGeneration));
 
-        Future<?> workerTask =
-                workerPool.submit(
-                        () -> {
+        submitCancellableWorker(
+                opCtx,
+                resultFuture,
+                () -> {
                             if (isOperationSuperseded(opCtx)) {
                                 cancelOperationIfNotCommitted(opCtx);
                                 resultFuture.cancel(false);
@@ -468,12 +528,16 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                                 "",
                                                 attemptGeneration));
 
-                                // Chỉ khởi chạy awaitPair sau khi COMMITTED (nếu bị disconnect ngay sau commit thì dừng)
+                                // Chỉ khởi chạy awaitPair sau khi COMMITTED (nếu bị disconnect/shutdown ngay sau commit thì dừng)
                                 if (isCurrentRelayContext(relayCtx)) {
                                     final PendingRelayContext committedRelayCtx = relayCtx;
-                                    Future<?> waiterTask =
-                                            workerPool.submit(() -> awaitRelayPair(committedRelayCtx));
-                                    committedRelayCtx.bindWaiter(waiterTask);
+                                    try {
+                                        Future<?> waiterTask =
+                                                workerPool.submit(() -> awaitRelayPair(committedRelayCtx));
+                                        committedRelayCtx.bindWaiter(waiterTask);
+                                    } catch (RejectedExecutionException rejected) {
+                                        closeRelayTicketIfMatches(committedRelayCtx);
+                                    }
                                 }
                             } catch (IOException | RuntimeException e) {
                                 SessionViewModel errVm =
@@ -489,7 +553,6 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                 failOperationExceptionally(opCtx, resultFuture, e, errVm);
                             }
                         });
-        opCtx.bindTask(workerTask);
         return resultFuture;
     }
 
@@ -608,6 +671,10 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
         final String relayAddress = trimmedHost + ":" + relayPort;
         CompletableFuture<SessionViewModel> resultFuture = new CompletableFuture<>();
         PendingOperationContext opCtx = startCancellableOperation(resultFuture);
+        if (opCtx == null) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Adapter đã đóng, không thể kết nối Relay."));
+        }
         final long attemptGeneration = opCtx.generation;
 
         dispatchSessionUpdate(
@@ -622,9 +689,10 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                         "",
                         attemptGeneration));
 
-        Future<?> workerTask =
-                workerPool.submit(
-                        () -> {
+        submitCancellableWorker(
+                opCtx,
+                resultFuture,
+                () -> {
                             if (isOperationSuperseded(opCtx)) {
                                 cancelOperationIfNotCommitted(opCtx);
                                 resultFuture.cancel(false);
@@ -718,7 +786,6 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                 failOperationExceptionally(opCtx, resultFuture, e, errVm);
                             }
                         });
-        opCtx.bindTask(workerTask);
         return resultFuture;
     }
 
@@ -745,7 +812,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                     new IllegalStateException("Không tìm thấy phiên kết nối tương ứng ID: " + sessionId));
         }
 
-        return CompletableFuture.supplyAsync(
+        return supplyAsyncOnWorker(
                 () -> {
                     if (!isCurrentContext(ctx)) {
                         throw new CompletionException(
@@ -812,13 +879,13 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                         }
                         throw new CompletionException(e);
                     }
-                },
-                workerPool);
+                });
     }
 
     private void startWaitingForOfferLoop(ActiveSessionContext ctx) {
-        workerPool.submit(
-                () -> {
+        try {
+            workerPool.submit(
+                    () -> {
                     try {
                         FileOffer offer = ctx.session().receiveOffer();
                         synchronized (sessionLock) {
@@ -877,6 +944,9 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                         }
                     }
                 });
+        } catch (RejectedExecutionException rejected) {
+            closeSessionIfMatches(ctx);
+        }
     }
 
     @Override
@@ -893,7 +963,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                             "Phiên chưa đạt trạng thái SECURE_READY, không được phép truyền dữ liệu."));
         }
 
-        return CompletableFuture.supplyAsync(
+        return supplyAsyncOnWorker(
                 () -> {
                     if (!isCurrentContext(ctx)
                             || ctx.session().info().state() != SessionInfo.State.VERIFIED) {
@@ -999,8 +1069,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                     } finally {
                         closeSessionIfMatches(ctx);
                     }
-                },
-                workerPool);
+                });
     }
 
     @Override
@@ -1026,7 +1095,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                             "Không có yêu cầu truyền tệp phù hợp với phiên hiện hành và ID: " + transferId));
         }
 
-        return CompletableFuture.runAsync(
+        return runAsyncOnWorker(
                 () -> {
                     if (!isCurrentContext(ctx)) {
                         throw new IllegalStateException("Phiên nhận tệp đã bị thay thế.");
@@ -1121,8 +1190,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                     } finally {
                         closeSessionIfMatches(ctx);
                     }
-                },
-                workerPool);
+                });
     }
 
     @Override
@@ -1133,7 +1201,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
             ctx = this.activeContext;
             offerCtx = this.pendingIncomingOffer;
         }
-        return CompletableFuture.runAsync(
+        return runAsyncOnWorker(
                 () -> {
                     if (ctx == null || offerCtx == null || offerCtx.generation() != ctx.generation()) {
                         return;
@@ -1163,8 +1231,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                             dispatchTransferUpdate(ctx.generation(), rejectedVm);
                         }
                     }
-                },
-                workerPool);
+                });
     }
 
     @Override
@@ -1173,7 +1240,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
         if (ctx == null) {
             return CompletableFuture.completedFuture(null);
         }
-        return CompletableFuture.runAsync(
+        return runAsyncOnWorker(
                 () -> {
                     if (!isCurrentContext(ctx)) {
                         return;
@@ -1200,8 +1267,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                     sId,
                                     gen);
                     dispatchTransferUpdate(gen, cancelledVm);
-                },
-                workerPool);
+                });
     }
 
     @Override
@@ -1216,21 +1282,20 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
         if (!running.get()) {
             return CompletableFuture.completedFuture(null);
         }
-        // Tách và hủy ngay lập tức mọi operation/ticket đang chạy (non-blocking, an toàn trên EDT)
-        DetachedResources detached = invalidateAndDetach(sessionId);
+        // Tách và đăng ký theo dõi ngay dưới sessionLock (non-blocking, an toàn trên EDT)
+        DetachedResources detached = invalidateAndDetach(sessionId, false);
         if (detached == null) {
             return CompletableFuture.completedFuture(null);
         }
         cancelDetachedAsyncHandles(detached);
 
-        return CompletableFuture.runAsync(
-                () -> {
-                    closeDetachedIo(detached);
-                    SessionViewModel disconnected =
-                            SessionViewModel.createDisconnected(detached.nextGeneration());
-                    dispatchSessionUpdate(detached.nextGeneration(), disconnected);
-                },
-                workerPool);
+        Runnable detachHook = this.onAfterDisconnectDetachedForTest;
+        if (detachHook != null) {
+            detachHook.run();
+        }
+
+        // Chạy cleanup trên cleanupPool độc lập (không phụ thuộc workerPool, có fallback nếu shutdown đã đóng)
+        return scheduleDetachedCleanupAsync(detached, true);
     }
 
     @Override
@@ -1248,11 +1313,10 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
 
     @Override
     public void shutdown() {
-        running.set(false);
-        DetachedResources detached = invalidateAndDetach(null);
+        DetachedResources detached = invalidateAndDetach(null, true);
         if (detached != null) {
             cancelDetachedAsyncHandles(detached);
-            closeDetachedIo(detached);
+            closeDetachedIoSafely(detached);
         }
         if (serverListener != null) {
             try {
@@ -1266,16 +1330,31 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+        // Đóng ngay mọi tài nguyên đã được detach bởi disconnect()/cancel() đồng thời
+        drainPendingCleanups();
+
+        // Tắt cleanupPool theo chế độ graceful (không dùng shutdownNow) để không làm rơi tác vụ đang xếp hàng
+        cleanupPool.shutdown();
+        try {
+            cleanupPool.awaitTermination(2, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        // Quét lại lần cuối để đảm bảo không còn tài nguyên detach nào chưa đóng
+        drainPendingCleanups();
     }
 
     public boolean isShutdown() {
-        return !running.get() && workerPool.isShutdown();
+        return !running.get() && workerPool.isShutdown() && cleanupPool.isShutdown();
     }
 
     private PendingOperationContext startCancellableOperation(CompletableFuture<?> resultFuture) {
         DetachedResources previous;
         PendingOperationContext opCtx;
         synchronized (sessionLock) {
+            if (!running.get()) {
+                return null;
+            }
             long nextGen = generationSequence.incrementAndGet();
             activeGeneration.set(nextGen);
             PendingOperationContext oldOp = this.activeOperation;
@@ -1292,7 +1371,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
 
             opCtx = new PendingOperationContext(nextGen, resultFuture);
             this.activeOperation = opCtx;
-            previous = new DetachedResources(nextGen, oldOp, oldTicket, oldSession);
+            previous = detachAndTrackLocked(nextGen, oldOp, oldTicket, oldSession);
         }
 
         cancelDetachedAsyncHandles(previous);
@@ -1305,6 +1384,36 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                     }
                 });
         return opCtx;
+    }
+
+    private <T> CompletableFuture<T> supplyAsyncOnWorker(Supplier<T> supplier) {
+        try {
+            return CompletableFuture.supplyAsync(supplier, workerPool);
+        } catch (RejectedExecutionException rejected) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Adapter đã đóng.", rejected));
+        }
+    }
+
+    private CompletableFuture<Void> runAsyncOnWorker(Runnable action) {
+        try {
+            return CompletableFuture.runAsync(action, workerPool);
+        } catch (RejectedExecutionException rejected) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Adapter đã đóng.", rejected));
+        }
+    }
+
+    private <T> void submitCancellableWorker(
+            PendingOperationContext opCtx, CompletableFuture<T> resultFuture, Runnable task) {
+        try {
+            Future<?> workerTask = workerPool.submit(task);
+            opCtx.bindTask(workerTask);
+        } catch (RejectedExecutionException rejected) {
+            cancelOperationIfNotCommitted(opCtx);
+            resultFuture.completeExceptionally(
+                    new IllegalStateException("Adapter đã đóng, không thể khởi chạy thao tác mạng.", rejected));
+        }
     }
 
     /**
@@ -1387,7 +1496,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                     this.pendingIncomingOffer = null;
                 }
                 if (ticketToClose != null || sessionToClose != null) {
-                    detached = new DetachedResources(-1L, null, ticketToClose, sessionToClose);
+                    detached = detachAndTrackLocked(-1L, null, ticketToClose, sessionToClose);
                 }
                 shouldReportError = running.get() && activeGeneration.get() == opCtx.generation;
             }
@@ -1445,21 +1554,25 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
             nextGen = generationSequence.incrementAndGet();
             activeGeneration.set(nextGen);
         }
-        return new DetachedResources(nextGen, opCtx, ticketToClose, sessionToClose);
+        return detachAndTrackLocked(nextGen, opCtx, ticketToClose, sessionToClose);
     }
 
     private void finishCancellationOutsideLock(DetachedResources detached) {
         cancelDetachedAsyncHandles(detached);
         closeDetachedIoSafely(detached);
-        if (detached.nextGeneration() > 0 && running.get()) {
+        if (detached.nextGeneration > 0 && running.get()) {
             dispatchSessionUpdate(
-                    detached.nextGeneration(),
-                    SessionViewModel.createDisconnected(detached.nextGeneration()));
+                    detached.nextGeneration,
+                    SessionViewModel.createDisconnected(detached.nextGeneration));
         }
     }
 
-    private DetachedResources invalidateAndDetach(String onlyIfMatchingSessionId) {
+    private DetachedResources invalidateAndDetach(
+            String onlyIfMatchingSessionId, boolean markStopped) {
         synchronized (sessionLock) {
+            if (markStopped) {
+                running.set(false);
+            }
             if (onlyIfMatchingSessionId != null && !onlyIfMatchingSessionId.isBlank()) {
                 if (activeContext == null
                         || !activeContext.sessionId().equals(onlyIfMatchingSessionId)) {
@@ -1480,37 +1593,118 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
             this.activeRelayTicket = null;
             this.activeContext = null;
             this.pendingIncomingOffer = null;
-            return new DetachedResources(nextGen, oldOp, oldTicket, oldSession);
+            return detachAndTrackLocked(nextGen, oldOp, oldTicket, oldSession);
         }
+    }
+
+    /**
+     * Phải được gọi bên trong {@code synchronized (sessionLock)}: đăng ký ngay vào {@code pendingCleanups}
+     * trước khi nhả lock để {@code shutdown()} đồng thời luôn nhìn thấy và đóng được tài nguyên đã tách.
+     */
+    private DetachedResources detachAndTrackLocked(
+            long nextGen,
+            PendingOperationContext op,
+            PendingRelayContext ticket,
+            TransferSession session) {
+        DetachedResources detached = new DetachedResources(nextGen, op, ticket, session);
+        if (detached.hasCloseableIo()) {
+            pendingCleanups.add(detached);
+        }
+        return detached;
     }
 
     private static void cancelDetachedAsyncHandles(DetachedResources detached) {
-        if (detached.operationToCancel() != null) {
-            detached.operationToCancel().cancelOperation();
+        if (detached.operationToCancel != null) {
+            detached.operationToCancel.cancelOperation();
         }
-        if (detached.relayTicketToClose() != null) {
-            detached.relayTicketToClose().cancelWaiter();
+        if (detached.relayTicketToClose != null) {
+            detached.relayTicketToClose.cancelWaiter();
         }
     }
 
-    private static void closeDetachedIo(DetachedResources detached) {
-        if (detached.relayTicketToClose() != null) {
-            closeQuietly(detached.relayTicketToClose().ticket);
+    private void closeDetachedIoAndUnregister(DetachedResources detached) {
+        if (detached == null) {
+            return;
         }
-        closeQuietly(detached.sessionToClose());
+        try {
+            detached.closeIoIdempotently();
+        } finally {
+            pendingCleanups.remove(detached);
+        }
+    }
+
+    /**
+     * Thực thi dọn dẹp tài nguyên đã tách trên {@code cleanupPool} độc lập với {@code workerPool}.
+     * Nếu {@code cleanupPool} đã bị tắt bởi {@code shutdown()} đồng thời ({@link RejectedExecutionException}),
+     * chuyển sang fallback Virtual Thread độc lập (và fallback cuối an toàn ngoài Swing EDT) để bảo đảm
+     * socket luôn được đóng idempotent và không bao giờ ném {@code RejectedExecutionException} ra caller.
+     */
+    private CompletableFuture<Void> scheduleDetachedCleanupAsync(
+            DetachedResources detached, boolean dispatchDisconnectedAfterClose) {
+        CompletableFuture<Void> done = new CompletableFuture<>();
+        Runnable cleanupTask =
+                () -> {
+                    try {
+                        closeDetachedIoAndUnregister(detached);
+                        if (dispatchDisconnectedAfterClose
+                                && detached.nextGeneration > 0
+                                && running.get()) {
+                            dispatchSessionUpdate(
+                                    detached.nextGeneration,
+                                    SessionViewModel.createDisconnected(detached.nextGeneration));
+                        }
+                    } finally {
+                        done.complete(null);
+                    }
+                };
+        try {
+            cleanupPool.execute(cleanupTask);
+        } catch (RejectedExecutionException rejected) {
+            runCleanupFallbackOffEdt(cleanupTask);
+        }
+        return done;
+    }
+
+    private void runCleanupFallbackOffEdt(Runnable cleanupTask) {
+        try {
+            Thread.ofVirtual().name("p2p-cleanup-fallback").start(cleanupTask);
+        } catch (Throwable virtualFailed) {
+            if (!SwingUtilities.isEventDispatchThread()) {
+                cleanupTask.run();
+                return;
+            }
+            try {
+                Thread daemon = new Thread(cleanupTask, "p2p-cleanup-fallback-platform");
+                daemon.setDaemon(true);
+                daemon.start();
+            } catch (Throwable platformFailed) {
+                // Giải pháp cuối nếu JVM không thể tạo bất kỳ luồng nào nữa
+                cleanupTask.run();
+            }
+        }
     }
 
     /**
      * Đóng socket/ticket/session đã tách ngoài {@code sessionLock} và tuyệt đối không block Swing EDT.
      */
-    private static void closeDetachedIoSafely(DetachedResources detached) {
-        if (detached.relayTicketToClose() == null && detached.sessionToClose() == null) {
+    private void closeDetachedIoSafely(DetachedResources detached) {
+        if (detached == null) {
+            return;
+        }
+        if (!detached.hasCloseableIo()) {
+            pendingCleanups.remove(detached);
             return;
         }
         if (SwingUtilities.isEventDispatchThread()) {
-            Thread.ofVirtual().name("p2p-close-detached-io").start(() -> closeDetachedIo(detached));
+            scheduleDetachedCleanupAsync(detached, false);
         } else {
-            closeDetachedIo(detached);
+            closeDetachedIoAndUnregister(detached);
+        }
+    }
+
+    private void drainPendingCleanups() {
+        for (DetachedResources pending : pendingCleanups) {
+            closeDetachedIoSafely(pending);
         }
     }
 
