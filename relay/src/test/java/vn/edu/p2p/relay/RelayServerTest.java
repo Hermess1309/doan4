@@ -29,7 +29,8 @@ class RelayServerTest {
             assertArrayEquals(new byte[] {1, 2, 3}, right.getInputStream().readNBytes(3));
             right.getOutputStream().write(99);
             assertEquals(99, left.getInputStream().read());
-            assertTrue(relay.stats().forwardedBytes() >= 4);
+            // Receiving bytes can precede the forwarding worker's post-write counter update.
+            eventually(() -> relay.stats().forwardedBytes() >= 4);
         }
     }
 
