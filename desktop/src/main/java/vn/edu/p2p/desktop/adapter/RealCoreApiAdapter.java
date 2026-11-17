@@ -3,6 +3,7 @@ package vn.edu.p2p.desktop.adapter;
 import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -23,24 +24,25 @@ import vn.edu.p2p.core.FileOffer;
 import vn.edu.p2p.core.PeerListener;
 import vn.edu.p2p.core.PeerNode;
 import vn.edu.p2p.core.SessionInfo;
-import vn.edu.p2p.core.TransferProgress;
 import vn.edu.p2p.core.TransferProgress.State;
 import vn.edu.p2p.core.TransferRejectedException;
 import vn.edu.p2p.core.TransferResult;
 import vn.edu.p2p.core.TransferSession;
+import vn.edu.p2p.desktop.model.RelayTicketInfo;
 import vn.edu.p2p.desktop.model.SessionViewModel;
 import vn.edu.p2p.desktop.model.SessionViewModel.SessionState;
 import vn.edu.p2p.desktop.model.TransferViewModel;
 import vn.edu.p2p.desktop.model.TransferViewModel.TransferDirection;
 import vn.edu.p2p.desktop.model.TransferViewModel.TransferState;
 import vn.edu.p2p.desktop.util.ValidationUtils;
+import vn.edu.p2p.relay.RelayClient;
 
 /**
- * Triển khai Adapter thực tế kết nối trực tiếp giao diện Java Swing với Core M3 backend.
- * - Quản lý PeerNode và vòng đời TransferSession theo cơ chế session generation bất biến.
- * - Mọi callback (SECURE_READY, ERROR, OFFER, TRANSFER, CANCEL) đều gắn sessionId và generation;
- *   kiểm tra tính hợp lệ cả trước khi xếp hàng và ngay tại thời điểm thực thi trên Swing EDT.
- * - Lắng nghe kết nối LAN, thực hiện TLS 1.3 pinning handshake và truyền tệp hoàn toàn ngoài EDT.
+ * Triển khai Adapter thực tế kết nối trực tiếp giao diện Java Swing với Core M3 và Relay M6.
+ * - Hỗ trợ cả LAN trực tiếp (PeerNode.connect / PeerListener.accept) lẫn Relay (RelayClient CREATE/JOIN + PeerNode.attach).
+ * - Quản lý vòng đời phiên và vé chờ Relay theo sessionGeneration bất biến; mọi callback đều kiểm tra
+ *   generation/sessionId cả trước khi xếp hàng và ngay tại lúc thực thi trên Swing EDT.
+ * - Không bao giờ ghi mã pairing ra log; không bao giờ bật SECURE_READY trước khi mutual TLS 1.3 thành công.
  */
 public class RealCoreApiAdapter implements CoreApiAdapter {
 
@@ -48,13 +50,18 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
     private static final int ACCEPT_TIMEOUT_MS = 3000;
     private static final int IO_TIMEOUT_MS = 60000;
     private static final int CONNECT_TIMEOUT_MS = 10000;
+    private static final int RELAY_CONTROL_TIMEOUT_MS = 15000;
 
     private record ActiveSessionContext(
             long generation,
             String sessionId,
             String remoteAddress,
             TransferSession session,
-            boolean serverRole) {}
+            boolean serverRole,
+            boolean relay) {}
+
+    private record PendingRelayContext(
+            long generation, String relayAddress, RelayClient.Pending ticket) {}
 
     private record PendingOfferContext(long generation, String sessionId, FileOffer offer) {}
 
@@ -73,6 +80,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
             new CopyOnWriteArrayList<>();
 
     private volatile ActiveSessionContext activeContext;
+    private volatile PendingRelayContext activeRelayTicket;
     private volatile PendingOfferContext pendingIncomingOffer;
     private volatile SessionViewModel currentSessionVm = SessionViewModel.createDisconnected();
     private volatile TransferViewModel currentTransferVm = TransferViewModel.createIdle();
@@ -149,7 +157,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
     private void handleIncomingSession(TransferSession acceptedSession) {
         ActiveSessionContext newCtx;
         synchronized (sessionLock) {
-            if (!running.get() || activeContext != null) {
+            if (!running.get() || activeContext != null || activeRelayTicket != null) {
                 closeQuietly(acceptedSession);
                 return;
             }
@@ -157,7 +165,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
             SessionInfo info = acceptedSession.info();
             newCtx =
                     new ActiveSessionContext(
-                            gen, info.sessionId().toString(), "Peer từ mạng LAN", acceptedSession, true);
+                            gen, info.sessionId().toString(), "Peer từ mạng LAN", acceptedSession, true, false);
             this.activeContext = newCtx;
             this.pendingIncomingOffer = null;
             this.activeGeneration.set(gen);
@@ -191,7 +199,6 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                     new IllegalStateException("Adapter đã đóng, không thể tạo kết nối mới."));
         }
 
-        // Cấp ngay thế hệ mới và vô hiệu hóa phiên cũ trước khi mở kết nối TCP mới
         final long attemptGeneration = invalidateAndReserveGeneration();
 
         return CompletableFuture.supplyAsync(
@@ -218,6 +225,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                             info.sessionId().toString(),
                                             host + ":" + port,
                                             session,
+                                            false,
                                             false);
                             this.activeContext = installedCtx;
                             this.pendingIncomingOffer = null;
@@ -254,10 +262,299 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
     }
 
     @Override
+    public CompletableFuture<RelayTicketInfo> createRelaySession(String relayHost, int relayPort) {
+        if (!ValidationUtils.isValidHostOrIp(relayHost)) {
+            return CompletableFuture.failedFuture(
+                    new IllegalArgumentException("Địa chỉ Relay Server không hợp lệ: " + relayHost));
+        }
+        if (!ValidationUtils.isValidPort(relayPort)) {
+            return CompletableFuture.failedFuture(
+                    new IllegalArgumentException("Cổng Relay Server không hợp lệ: " + relayPort));
+        }
+        if (!running.get()) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Adapter đã đóng, không thể tạo mã ghép nối Relay."));
+        }
+
+        final String trimmedHost = relayHost.trim();
+        final String relayAddress = trimmedHost + ":" + relayPort;
+        final long attemptGeneration = invalidateAndReserveGeneration();
+
+        dispatchSessionUpdate(
+                attemptGeneration,
+                new SessionViewModel(
+                        "",
+                        "Relay (" + relayAddress + ")",
+                        peerNode.localFingerprint(),
+                        "",
+                        true,
+                        SessionState.RELAY_CONNECTING,
+                        "",
+                        attemptGeneration));
+
+        return CompletableFuture.supplyAsync(
+                () -> {
+                    if (!running.get() || activeGeneration.get() != attemptGeneration) {
+                        throw new CompletionException(
+                                new IllegalStateException("Yêu cầu tạo mã Relay đã bị hủy hoặc thay thế."));
+                    }
+                    try {
+                        RelayClient.Pending ticket =
+                                RelayClient.create(
+                                        new InetSocketAddress(trimmedHost, relayPort), RELAY_CONTROL_TIMEOUT_MS);
+                        PendingRelayContext relayCtx;
+                        synchronized (sessionLock) {
+                            if (!running.get() || activeGeneration.get() != attemptGeneration) {
+                                closeQuietly(ticket);
+                                throw new IllegalStateException("Vé Relay vừa tạo nhưng phiên đã bị hủy/thay thế.");
+                            }
+                            relayCtx = new PendingRelayContext(attemptGeneration, relayAddress, ticket);
+                            this.activeRelayTicket = relayCtx;
+                        }
+
+                        dispatchSessionUpdate(
+                                attemptGeneration,
+                                new SessionViewModel(
+                                        "",
+                                        "Relay (" + relayAddress + ")",
+                                        peerNode.localFingerprint(),
+                                        "",
+                                        true,
+                                        SessionState.WAITING_FOR_PEER,
+                                        "",
+                                        attemptGeneration));
+
+                        // Bắt đầu chờ peer JOIN trên background worker (không chặn EDT)
+                        workerPool.submit(() -> awaitRelayPair(relayCtx));
+
+                        return new RelayTicketInfo(
+                                attemptGeneration, ticket.code(), ticket.ttlMillis(), relayAddress);
+                    } catch (IOException e) {
+                        if (running.get() && activeGeneration.get() == attemptGeneration) {
+                            dispatchSessionUpdate(
+                                    attemptGeneration,
+                                    new SessionViewModel(
+                                            "",
+                                            "Relay (" + relayAddress + ")",
+                                            peerNode.localFingerprint(),
+                                            "",
+                                            true,
+                                            SessionState.ERROR,
+                                            "Không thể tạo mã ghép nối trên Relay: " + e.getMessage(),
+                                            attemptGeneration));
+                        }
+                        throw new CompletionException(e);
+                    }
+                },
+                workerPool);
+    }
+
+    private void awaitRelayPair(PendingRelayContext relayCtx) {
+        try {
+            Socket pairedSocket = relayCtx.ticket().awaitPair();
+            if (!isCurrentRelayContext(relayCtx)) {
+                closeQuietly(pairedSocket);
+                return;
+            }
+
+            dispatchSessionUpdate(
+                    relayCtx.generation(),
+                    new SessionViewModel(
+                            "",
+                            "Relay (" + relayCtx.relayAddress() + ")",
+                            peerNode.localFingerprint(),
+                            "",
+                            true,
+                            SessionState.TCP_CONNECTED,
+                            "",
+                            relayCtx.generation()));
+
+            // Chuyển hoàn toàn quyền sở hữu socket đã PAIRED cho PeerNode.attach với vai trò TLS SERVER (Receiver)
+            TransferSession session =
+                    peerNode.attach(pairedSocket, PeerNode.TlsRole.SERVER, IO_TIMEOUT_MS);
+
+            ActiveSessionContext installedCtx;
+            synchronized (sessionLock) {
+                if (!running.get() || activeGeneration.get() != relayCtx.generation()) {
+                    closeQuietly(session);
+                    return;
+                }
+                if (this.activeRelayTicket == relayCtx) {
+                    this.activeRelayTicket = null;
+                }
+                SessionInfo info = session.info();
+                installedCtx =
+                        new ActiveSessionContext(
+                                relayCtx.generation(),
+                                info.sessionId().toString(),
+                                "Relay (" + relayCtx.relayAddress() + ")",
+                                session,
+                                true,
+                                true);
+                this.activeContext = installedCtx;
+                this.pendingIncomingOffer = null;
+            }
+
+            dispatchSessionUpdate(
+                    installedCtx.generation(),
+                    new SessionViewModel(
+                            installedCtx.sessionId(),
+                            installedCtx.remoteAddress(),
+                            peerNode.localFingerprint(),
+                            "",
+                            true,
+                            SessionState.WAITING_FOR_FINGERPRINT,
+                            "",
+                            installedCtx.generation()));
+        } catch (IOException e) {
+            boolean stillCurrent = isCurrentRelayContext(relayCtx);
+            closeRelayTicketIfMatches(relayCtx);
+            if (stillCurrent) {
+                dispatchSessionUpdate(
+                        relayCtx.generation(),
+                        new SessionViewModel(
+                                "",
+                                "Relay (" + relayCtx.relayAddress() + ")",
+                                peerNode.localFingerprint(),
+                                "",
+                                true,
+                                SessionState.ERROR,
+                                "Ghép nối Relay không thành công hoặc đã hết hạn chờ: " + e.getMessage(),
+                                relayCtx.generation()));
+            }
+        }
+    }
+
+    @Override
+    public CompletableFuture<SessionViewModel> joinRelaySession(
+            String relayHost, int relayPort, String pairingCode) {
+        if (!ValidationUtils.isValidHostOrIp(relayHost)) {
+            return CompletableFuture.failedFuture(
+                    new IllegalArgumentException("Địa chỉ Relay Server không hợp lệ: " + relayHost));
+        }
+        if (!ValidationUtils.isValidPort(relayPort)) {
+            return CompletableFuture.failedFuture(
+                    new IllegalArgumentException("Cổng Relay Server không hợp lệ: " + relayPort));
+        }
+        final String canonicalCode = ValidationUtils.canonicalizeRelayPairingCode(pairingCode);
+        if (canonicalCode.isEmpty()) {
+            return CompletableFuture.failedFuture(
+                    new IllegalArgumentException(
+                            "Mã ghép nối Relay không hợp lệ (phải đủ 12 ký tự chuẩn, không gồm 0/1/I/O)."));
+        }
+        if (!running.get()) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Adapter đã đóng, không thể kết nối Relay."));
+        }
+
+        final String trimmedHost = relayHost.trim();
+        final String relayAddress = trimmedHost + ":" + relayPort;
+        final long attemptGeneration = invalidateAndReserveGeneration();
+
+        dispatchSessionUpdate(
+                attemptGeneration,
+                new SessionViewModel(
+                        "",
+                        "Relay (" + relayAddress + ")",
+                        peerNode.localFingerprint(),
+                        "",
+                        true,
+                        SessionState.RELAY_CONNECTING,
+                        "",
+                        attemptGeneration));
+
+        return CompletableFuture.supplyAsync(
+                () -> {
+                    if (!running.get() || activeGeneration.get() != attemptGeneration) {
+                        throw new CompletionException(
+                                new IllegalStateException("Yêu cầu ghép nối Relay đã bị hủy hoặc thay thế."));
+                    }
+                    try {
+                        Socket pairedSocket =
+                                RelayClient.join(
+                                        new InetSocketAddress(trimmedHost, relayPort),
+                                        canonicalCode,
+                                        RELAY_CONTROL_TIMEOUT_MS);
+                        if (!running.get() || activeGeneration.get() != attemptGeneration) {
+                            closeQuietly(pairedSocket);
+                            throw new IllegalStateException(
+                                    "Kết nối Relay vừa ghép xong nhưng đã bị thay thế bởi phiên mới.");
+                        }
+
+                        dispatchSessionUpdate(
+                                attemptGeneration,
+                                new SessionViewModel(
+                                        "",
+                                        "Relay (" + relayAddress + ")",
+                                        peerNode.localFingerprint(),
+                                        "",
+                                        true,
+                                        SessionState.TCP_CONNECTED,
+                                        "",
+                                        attemptGeneration));
+
+                        // Chuyển hoàn toàn quyền sở hữu socket đã PAIRED cho PeerNode.attach với vai trò TLS CLIENT (Sender)
+                        TransferSession session =
+                                peerNode.attach(pairedSocket, PeerNode.TlsRole.CLIENT, IO_TIMEOUT_MS);
+
+                        ActiveSessionContext installedCtx;
+                        synchronized (sessionLock) {
+                            if (!running.get() || activeGeneration.get() != attemptGeneration) {
+                                closeQuietly(session);
+                                throw new IllegalStateException(
+                                        "Phiên Relay vừa tạo nhưng đã bị thay thế bởi phiên mới.");
+                            }
+                            SessionInfo info = session.info();
+                            installedCtx =
+                                    new ActiveSessionContext(
+                                            attemptGeneration,
+                                            info.sessionId().toString(),
+                                            "Relay (" + relayAddress + ")",
+                                            session,
+                                            false,
+                                            true);
+                            this.activeContext = installedCtx;
+                            this.pendingIncomingOffer = null;
+                        }
+
+                        SessionViewModel vm =
+                                new SessionViewModel(
+                                        installedCtx.sessionId(),
+                                        installedCtx.remoteAddress(),
+                                        peerNode.localFingerprint(),
+                                        "",
+                                        true,
+                                        SessionState.WAITING_FOR_FINGERPRINT,
+                                        "",
+                                        installedCtx.generation());
+                        dispatchSessionUpdate(installedCtx.generation(), vm);
+                        return vm;
+                    } catch (IOException e) {
+                        if (running.get() && activeGeneration.get() == attemptGeneration) {
+                            dispatchSessionUpdate(
+                                    attemptGeneration,
+                                    new SessionViewModel(
+                                            "",
+                                            "Relay (" + relayAddress + ")",
+                                            peerNode.localFingerprint(),
+                                            "",
+                                            true,
+                                            SessionState.ERROR,
+                                            "Kết nối Relay thất bại (mã không hợp lệ/hết hạn hoặc máy chủ không sẵn sàng): "
+                                                    + e.getMessage(),
+                                            attemptGeneration));
+                        }
+                        throw new CompletionException(e);
+                    }
+                },
+                workerPool);
+    }
+
+    @Override
     public CompletableFuture<SessionViewModel> connectRelay(String pairingCode) {
         return CompletableFuture.failedFuture(
                 new UnsupportedOperationException(
-                        "Tính năng kết nối qua Relay Server sẽ được tích hợp ở giai đoạn Relay UI tiếp theo."));
+                        "Vui lòng dùng joinRelaySession(relayHost, relayPort, pairingCode) để kết nối Relay thật."));
     }
 
     @Override
@@ -289,7 +586,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                     ctx.remoteAddress(),
                                     peerNode.localFingerprint(),
                                     canonicalPin,
-                                    false,
+                                    ctx.relay(),
                                     SessionState.TLS_HANDSHAKING,
                                     "",
                                     ctx.generation());
@@ -302,7 +599,6 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                             throw new IOException("Bắt tay TLS không đạt trạng thái VERIFIED.");
                         }
 
-                        // Phải kiểm tra lại generation sau khi verify xong: nếu phiên đã bị thay thế/ngắt, bỏ qua
                         if (!isCurrentContext(ctx)) {
                             closeQuietly(ctx.session());
                             throw new IllegalStateException(
@@ -315,7 +611,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                         ctx.remoteAddress(),
                                         peerNode.localFingerprint(),
                                         canonicalPin,
-                                        false,
+                                        ctx.relay(),
                                         SessionState.SECURE_READY,
                                         "",
                                         ctx.generation());
@@ -336,7 +632,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                             ctx.remoteAddress(),
                                             peerNode.localFingerprint(),
                                             canonicalPin,
-                                            false,
+                                            ctx.relay(),
                                             SessionState.ERROR,
                                             "Bắt tay TLS thất bại (Sai vân tay hoặc lỗi mạng): " + e.getMessage(),
                                             ctx.generation());
@@ -376,7 +672,6 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                         ctx.generation());
                         dispatchTransferUpdate(ctx.generation(), offerVm);
 
-                        // Kiểm tra lại generation ngay trên Swing EDT trước khi bật hộp thoại nhận tệp
                         SwingUtilities.invokeLater(
                                 () -> {
                                     if (!isCurrentContext(ctx)) {
@@ -754,7 +1049,6 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
                                 && !sessionId.isBlank()
                                 && activeContext != null
                                 && !activeContext.sessionId().equals(sessionId)) {
-                            // Bỏ qua yêu cầu ngắt kết nối của phiên cũ không còn active
                             return;
                         }
                         newGen = invalidateAndReserveGeneration();
@@ -801,18 +1095,24 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
     }
 
     private long invalidateAndReserveGeneration() {
-        TransferSession toClose = null;
+        TransferSession toCloseSession = null;
+        RelayClient.Pending toCloseTicket = null;
         long nextGen;
         synchronized (sessionLock) {
             nextGen = generationSequence.incrementAndGet();
             activeGeneration.set(nextGen);
             if (activeContext != null) {
-                toClose = activeContext.session();
+                toCloseSession = activeContext.session();
                 activeContext = null;
+            }
+            if (activeRelayTicket != null) {
+                toCloseTicket = activeRelayTicket.ticket();
+                activeRelayTicket = null;
             }
             pendingIncomingOffer = null;
         }
-        closeQuietly(toClose);
+        closeQuietly(toCloseTicket);
+        closeQuietly(toCloseSession);
         return nextGen;
     }
 
@@ -836,6 +1136,14 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
         return current == ctx && activeGeneration.get() == ctx.generation();
     }
 
+    private boolean isCurrentRelayContext(PendingRelayContext relayCtx) {
+        if (relayCtx == null || !running.get()) {
+            return false;
+        }
+        PendingRelayContext current = this.activeRelayTicket;
+        return current == relayCtx && activeGeneration.get() == relayCtx.generation();
+    }
+
     private void closeSessionIfMatches(ActiveSessionContext ctx) {
         if (ctx == null) {
             return;
@@ -847,6 +1155,18 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
             }
         }
         closeQuietly(ctx.session());
+    }
+
+    private void closeRelayTicketIfMatches(PendingRelayContext relayCtx) {
+        if (relayCtx == null) {
+            return;
+        }
+        synchronized (sessionLock) {
+            if (this.activeRelayTicket == relayCtx) {
+                this.activeRelayTicket = null;
+            }
+        }
+        closeQuietly(relayCtx.ticket());
     }
 
     private long closeAndAdvanceGenerationIfMatches(ActiveSessionContext ctx) {
@@ -866,11 +1186,11 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
         return nextGen;
     }
 
-    private static void closeQuietly(TransferSession session) {
-        if (session != null) {
+    private static void closeQuietly(AutoCloseable closeable) {
+        if (closeable != null) {
             try {
-                session.close();
-            } catch (IOException ignored) {
+                closeable.close();
+            } catch (Exception ignored) {
             }
         }
     }
@@ -887,7 +1207,6 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
         }
         SwingUtilities.invokeLater(
                 () -> {
-                    // Kiểm tra lại generation ngay lúc callback thực sự chạy trên Swing EDT
                     if (!running.get() || activeGeneration.get() != generation) {
                         return;
                     }
@@ -913,7 +1232,6 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
         }
         SwingUtilities.invokeLater(
                 () -> {
-                    // Kiểm tra lại generation ngay lúc callback thực sự chạy trên Swing EDT
                     if (!running.get() || activeGeneration.get() != generation) {
                         return;
                     }

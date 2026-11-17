@@ -122,24 +122,26 @@ public interface CoreApiAdapter {
 - **UI-02**: Tinh chỉnh tương tác giao diện, validation dữ liệu đầu vào (IP, Port, Pairing Code, Directory, File), ViewModels, xử lý trạng thái disabled an toàn và kiểm thử tự động toàn diện. *(Hoàn thành — Commit 8cf4ecd)*.
 - **UI-QA-01**: Rà soát QA, bảo vệ an toàn luồng và clipboard, chuẩn bị adapter `CoreApiAdapter`, hoàn thiện bảng mapping tích hợp cho UI-03. *(Hoàn thành — Commit a592fa5)*.
 - **UI-SEC-01**: Tinh chỉnh luồng bảo mật khớp 1:1 với M2 TLS 1.3 (TCP_CONNECTED -> WAITING_FOR_FINGERPRINT -> TLS_HANDSHAKING -> SECURE_READY), bổ sung ô nhập Expected Remote Fingerprint, kiểm tra 32 byte chuẩn xác. *(Hoàn thành — Commit 38b7d2c)*.
-- **UI-03A (Hiện tại)**: Tích hợp Core M3 thực tế (`PeerNode`, `PeerListener`, `TransferSession`) qua `RealCoreApiAdapter`, hỗ trợ truyền nhận file thật qua Mutual TLS 1.3 trên localhost/LAN, xác thực SHA-256, tự sinh danh tính bảo mật `LocalIdentityHelper`, xử lý an toàn EDT và kiểm thử toàn diện.
+- **UI-03A**: Tích hợp Core M3 thực tế (`PeerNode`, `PeerListener`, `TransferSession`) qua `RealCoreApiAdapter`, hỗ trợ truyền nhận file thật qua Mutual TLS 1.3 trên localhost/LAN, xác thực SHA-256, danh tính bảo mật `LocalIdentityHelper` (ACL/POSIX fail-closed), khởi động không chặn EDT và bảo vệ stale callback theo generation. *(Hoàn thành — PR #4, Commit ec82bea)*.
+- **UI-03B (Hiện tại)**: Tích hợp thật kênh Internet Relay M6 (`RelayClient.create/join`, `Pending.awaitPair`, `PeerNode.attach` với `TlsRole.SERVER/CLIENT`) vào tab Thiết bị song song với LAN trực tiếp; giữ nguyên Mutual TLS 1.3 đầu cuối, bắt buộc pin fingerprint trước handshake và không ghi mã ghép nối ra log.
 
 ---
 
-## 7. Bảng Mapping Tích hợp UI ↔ Core API (UI-03A Thực tế)
+## 7. Bảng Mapping Tích hợp UI ↔ Core & Relay API (UI-03A & UI-03B Thực tế)
 
-| Thành phần UI (UI Action) | Phương thức Core API thực tế | Trạng thái / Event nhận về | Điều kiện bảo mật bắt buộc | Quy tắc điều phối luồng (Threading) |
+| Thành phần UI (UI Action) | Phương thức Core / Relay API thực tế | Trạng thái / Event nhận về | Điều kiện bảo mật bắt buộc | Quy tắc điều phối luồng (Threading) |
 | :--- | :--- | :--- | :--- | :--- |
-| **Khởi động ứng dụng** | `PeerNode.loadIdentity`, `node.listen(port)` | Lắng nghe kết nối đến qua `PeerListener.accept()` | Sinh chứng chỉ X.509 RSA-3072 + EKU/KU nếu chưa có | Listener loop chạy trên Virtual Thread nền; không block EDT |
-| **Devices — Bấm "Kết nối LAN"** | `node.connect(host, port, timeout)` | `SessionState.TCP_CONNECTED` | Host hợp lệ (IPv4/Hostname) và Port từ 1-65535 | Chạy async trên worker pool; cập nhật ViewModel trên EDT |
+| **Khởi động ứng dụng** | `PeerNode.loadIdentity`, `node.listen(port)` | Lắng nghe kết nối LAN qua `PeerListener.accept()` | Xác minh thư mục & tệp bí mật (ACL/0700/0600, chống symlink) | Khởi tạo trên background worker; GUI hiển thị `"Đang khởi tạo ứng dụng..."` không chặn EDT |
+| **Devices — Bấm "Kết nối LAN"** | `node.connect(host, port, timeout)` | `SessionState.WAITING_FOR_FINGERPRINT` | Host hợp lệ (IPv4/Hostname) và Port từ 1-65535 | Chạy async trên worker pool; cập nhật ViewModel theo `sessionGeneration` trên EDT |
+| **Devices — Bấm "Tạo mã ghép nối" (Relay Máy nhận)** | `RelayClient.create` -> `ticket.awaitPair()` -> `node.attach(socket, TlsRole.SERVER, timeout)` | `RELAY_CONNECTING` -> `WAITING_FOR_PEER` -> `TCP_CONNECTED` -> `WAITING_FOR_FINGERPRINT` | Relay host/port hợp lệ; mã chỉ hiển thị 1 lần để định tuyến, không ghi log | Chạy trên Virtual Thread nền; Hủy kết nối đóng `Pending` ticket ngay lập tức |
+| **Devices — Bấm "Kết nối bằng mã" (Relay Máy gửi)** | `RelayClient.join` -> `node.attach(socket, TlsRole.CLIENT, timeout)` | `RELAY_CONNECTING` -> `TCP_CONNECTED` -> `WAITING_FOR_FINGERPRINT` | Mã đúng 12 ký tự chuẩn Relay (không gồm `0/1/I/O`); không tin fingerprint từ Relay | Chạy async trên worker pool; kiểm tra generation trước & trên EDT |
 | **Security — Hiển thị Local Fingerprint** | `node.localFingerprint()` | Chuỗi Hex SHA-256 (64 ký tự) | Certificate SHA-256 từ `LocalIdentity` | Hiển thị dạng nhóm 4 ký tự dễ đọc kèm nút sao chép |
-| **Security — Pin vân tay & Bắt tay TLS** | `session.verify(expectedPin)` | `SessionState.SECURE_READY` | Chuỗi kỳ vọng đủ 32 byte SHA-256 (64 hex) | Bắt tay mTLS 1.3 trên worker thread; nếu khớp pin mới chuyển `SECURE_READY`, nếu sai ném lỗi và đóng socket |
-| **Dashboard — Bấm "Bắt đầu gửi tệp"** | `session.send(filePath, callback)` | `TransferState.OFFERED` -> `TRANSFERRING` -> `HASHING` -> `COMPLETED` | Bắt buộc phiên ở trạng thái `SECURE_READY` | Chạy stream chunked và hash SHA-256 trên worker thread; callback bọc `SwingUtilities.invokeLater` throttle 100ms |
+| **Security — Pin vân tay & Bắt tay TLS** | `session.verify(sessionId, expectedPin)` | `SessionState.SECURE_READY` | Chuỗi kỳ vọng đủ 32 byte SHA-256 (64 hex) | Bắt tay mTLS 1.3 trên worker thread (cả LAN & Relay); chỉ khớp pin mới chuyển `SECURE_READY` |
+| **Dashboard — Bấm "Bắt đầu gửi tệp"** | `session.send(filePath, callback)` | `OFFERED` -> `TRANSFERRING` -> `HASHING` -> `COMPLETED` | Bắt buộc phiên ở trạng thái `SECURE_READY` | Chạy stream chunked và hash SHA-256 trên worker thread; callback kiểm tra generation trên EDT |
 | **Dashboard — Có yêu cầu nhận tệp** | `session.receiveOffer()` | `onIncomingOffer(offer)` | Đề nghị gửi từ đối tác đã mTLS | Kích hoạt popup xác nhận trên EDT, yêu cầu người dùng chọn file đích chưa tồn tại |
-| **Xác nhận nhận tệp** | `session.accept(transferId, destPath, callback)` | `TransferState.TRANSFERRING` -> `HASHING` -> `COMPLETED` | File đích chưa tồn tại trên đĩa (chống ghi đè) | Stream ghi file và kiểm tra SHA-256 trên worker thread; cập nhật `TransferViewModel` |
-| **Từ chối nhận tệp** | `session.reject(transferId, reason)` | `TransferState.REJECTED` | Session hợp lệ | Báo cho đối tác qua protocol và đóng phiên an toàn |
-| **Transfers — Hủy truyền tệp** | `session.close()` / `adapter.cancelTransfer()` | `TransferState.CANCELLED` | Có tác vụ đang truyền | Ngắt socket, đóng luồng, cập nhật trạng thái trên EDT |
-| **Đóng ứng dụng** | `adapter.shutdown()` | Giải phóng toàn bộ listener, session, executor | Window closing event | Đóng `PeerListener`, ngắt active `TransferSession`, tắt Virtual Thread executor |
+| **Xác nhận / Từ chối nhận tệp** | `session.accept(...)` / `session.reject(...)` | `COMPLETED` / `REJECTED` | File đích chưa tồn tại trên đĩa (chống ghi đè) | Stream ghi file & kiểm tra SHA-256 trên worker thread |
+| **Transfers — Hủy truyền / Hủy kết nối** | `adapter.cancelTransfer(...)` / `adapter.disconnect(...)` | `CANCELLED` / `DISCONNECTED` | Vô hiệu hóa `sessionGeneration` cũ | Đóng `Pending` ticket hoặc `TransferSession` đúng phiên |
+| **Đóng ứng dụng** | `adapter.shutdown()` | Giải phóng listener, pending ticket, session, executor | `windowClosing` / `dispose` | Không để rò rỉ socket hoặc thread nền |
 
 ---
 
@@ -220,8 +222,35 @@ Khởi chạy 2 Node (Alice và Bob) trên 2 cổng và danh tính riêng biệt
    - Tại Bob: Dán Fingerprint của Alice vào ô *Expected Remote Fingerprint*, bấm **Pin vân tay & Bắt tay TLS 1.3**.
    - Hai bên hoàn tất Mutual TLS 1.3 và chuyển sang **BẢO MẬT (SECURE_READY)** với viền xanh. Nút "Bắt đầu gửi tệp" ở Dashboard được kích hoạt.
 5. **Gửi & Nhận Tệp**:
-   - Từ Dashboard của Alice: chọn tệp tin cần gửi và bấm **Bắt đầu gửi tệp**.
-   - Bob nhận được thông báo yêu cầu nhận tệp kèm tên, kích thước và mã băm SHA-256; bấm Yes và chọn đường dẫn lưu tệp (chưa tồn tại).
+   - Từ Dashboard của bên kết nối (Sender): chọn tệp tin cần gửi và bấm **Bắt đầu gửi tệp**.
+   - Bên lắng nghe (Receiver) nhận hộp thoại xác nhận kèm tên, dung lượng và mã băm SHA-256; bấm Yes và chọn đường dẫn lưu tệp (chưa tồn tại).
    - Thanh tiến trình trên cả hai máy hiển thị tốc độ, % truyền và chuyển sang `COMPLETED` sau khi mã băm SHA-256 được đối chiếu khớp tuyệt đối.
-6. **Lưu ý Giới hạn M3**:
-   - Kênh chuyển tiếp Relay (M6) và tính năng Resume tệp dở dang (M4) chưa được kích hoạt trong giao diện Desktop UI tại mốc này. Kết nối hiện tại tập trung hoàn toàn vào Direct LAN/Localhost Mutual TLS 1.3.
+
+### 8.5. Kịch bản Demo Truyền Tệp Qua Relay Server (3 Tiến trình — UI-03B)
+Chuẩn bị bản phân phối CLI (cho Relay Server) và Desktop (cho 2 Peer UI):
+```bash
+# Windows
+.\gradlew.bat :cli:installDist :desktop:installDist
+
+# Ubuntu / Linux
+./gradlew :cli:installDist :desktop:installDist
+```
+
+1. **Tiến trình 1 — Khởi chạy Relay Server**:
+   - Windows: `.\cli\build\install\cli\bin\cli.bat relay-server --host 127.0.0.1 --port 47000`
+   - Ubuntu: `./cli/build/install/cli/bin/cli relay-server --host 127.0.0.1 --port 47000` *(khi triển khai public VPS, thay bằng `--host 0.0.0.0` và mở TCP 47000)*.
+2. **Tiến trình 2 — Khởi chạy Máy nhận (Receiver Desktop UI)**:
+   - Windows: `.\desktop\build\install\desktop\bin\desktop.bat --name=receiver --port=52001`
+   - Ubuntu: `./desktop/build/install/desktop/bin/desktop --name=receiver --port=52001`
+   - Vào tab **Thiết bị**, chọn **B. Kết nối Internet qua Relay Server**, nhập Relay Host `127.0.0.1`, Cổng `47000`, bấm **Tạo mã ghép nối**.
+   - Sao chép mã 12 ký tự (kèm TTL) vừa hiển thị để gửi cho máy gửi; sao chép SHA-256 Fingerprint tại tab **Bảo mật** qua kênh độc lập.
+3. **Tiến trình 3 — Khởi chạy Máy gửi (Sender Desktop UI)**:
+   - Windows: `.\desktop\build\install\desktop\bin\desktop.bat --name=sender --port=52002`
+   - Ubuntu: `./desktop/build/install/desktop/bin/desktop --name=sender --port=52002`
+   - Vào tab **Thiết bị**, chọn **B. Kết nối Internet qua Relay Server**, nhập cùng Relay Host/Port, dán mã ghép nối 12 ký tự, bấm **Kết nối bằng mã**.
+4. **Xác minh Mutual TLS 1.3 & Truyền Tệp**:
+   - Cả hai ứng dụng chuyển sang `WAITING_FOR_FINGERPRINT` (`Chưa có TLS`).
+   - Tại tab **Bảo mật**, hai bên dán SHA-256 Fingerprint của nhau (từ kênh độc lập, không lấy từ Relay) và bấm **Pin vân tay & Bắt tay TLS 1.3**.
+   - Chỉ sau khi đạt `SECURE_READY`, Máy gửi chọn tệp trên Dashboard và bấm **Bắt đầu gửi tệp**; Máy nhận xác nhận vị trí lưu không ghi đè; đối chiếu `Get-FileHash` / `sha256sum` hai đầu.
+5. **Lưu ý Giới hạn**:
+   - Tính năng Resume tệp dở dang (M4) chưa được triển khai. Kiểm thử localhost không thay thế demo qua Internet/NAT công cộng thực tế.

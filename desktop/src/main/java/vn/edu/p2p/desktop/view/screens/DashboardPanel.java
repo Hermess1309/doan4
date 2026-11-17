@@ -237,6 +237,18 @@ public class DashboardPanel extends JPanel {
                     ? currentSession.errorMessage() : "Lỗi xác thực / Handshake thất bại";
             lblSecurityStatus.setText("✕ " + err);
             lblSecurityStatus.setForeground(new Color(229, 87, 83));
+        } else if (currentSession.state() == SessionState.RELAY_CONNECTING) {
+            lblPeerStatus.setText(currentSession.remoteAddress());
+            lblSecurityStatus.setText("⟳ Đang kết nối tới Relay Server (Chưa có TLS)");
+            lblSecurityStatus.setForeground(new Color(53, 116, 240));
+        } else if (currentSession.state() == SessionState.WAITING_FOR_PEER) {
+            lblPeerStatus.setText(currentSession.remoteAddress());
+            lblSecurityStatus.setText("! Đang chờ đối tác ghép nối qua Relay (Chưa có TLS)");
+            lblSecurityStatus.setForeground(new Color(229, 168, 59));
+        } else if (currentSession.state() == SessionState.TCP_CONNECTED) {
+            lblPeerStatus.setText(currentSession.remoteAddress());
+            lblSecurityStatus.setText("! Đã ghép nối TCP — Chưa thiết lập TLS (Chưa bảo mật)");
+            lblSecurityStatus.setForeground(new Color(229, 168, 59));
         } else if (currentSession.sessionId().isBlank() || currentSession.state() == SessionState.DISCONNECTED) {
             lblPeerStatus.setText("Chưa kết nối (Vào mục 'Thiết bị & Mạng' để kết nối)");
             lblSecurityStatus.setText("Chưa kết nối");

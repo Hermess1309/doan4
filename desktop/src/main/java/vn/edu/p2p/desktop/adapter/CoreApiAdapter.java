@@ -3,13 +3,14 @@ package vn.edu.p2p.desktop.adapter;
 import java.io.File;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
+import vn.edu.p2p.desktop.model.RelayTicketInfo;
 import vn.edu.p2p.desktop.model.SessionViewModel;
 import vn.edu.p2p.desktop.model.TransferViewModel;
 
 /**
- * Hợp đồng Adapter nội bộ của desktop/ kết nối với Core Backend.
- * Phản ánh đúng 2 giai đoạn bảo mật của M2:
- * 1. Kết nối TCP (LAN / Relay).
+ * Hợp đồng Adapter nội bộ của desktop/ kết nối với Core Backend và Relay Client.
+ * Phản ánh đúng 2 giai đoạn bảo mật của M2/M6:
+ * 1. Kết nối TCP (LAN trực tiếp hoặc qua Relay CREATE/JOIN).
  * 2. Cung cấp expected remote fingerprint qua kênh độc lập để bắt tay Mutual TLS 1.3.
  */
 public interface CoreApiAdapter {
@@ -21,7 +22,22 @@ public interface CoreApiAdapter {
     CompletableFuture<SessionViewModel> connectDirect(String host, int port);
 
     /**
-     * Bắt đầu kết nối qua Relay Server bằng mã ghép nối.
+     * Máy nhận (Receiver): Kết nối tới Relay Server, gửi CREATE để nhận mã ghép nối thật và TTL,
+     * đồng thời chờ đối tác JOIN trên background worker. Khi PAIRED, gắn socket qua
+     * {@code PeerNode.attach(..., TlsRole.SERVER)} và chuyển sang WAITING_FOR_FINGERPRINT.
+     */
+    CompletableFuture<RelayTicketInfo> createRelaySession(String relayHost, int relayPort);
+
+    /**
+     * Máy gửi (Sender): Kết nối tới Relay Server, gửi JOIN với mã ghép nối 12 ký tự.
+     * Khi PAIRED, gắn socket qua {@code PeerNode.attach(..., TlsRole.CLIENT)} và chuyển sang
+     * WAITING_FOR_FINGERPRINT.
+     */
+    CompletableFuture<SessionViewModel> joinRelaySession(
+            String relayHost, int relayPort, String pairingCode);
+
+    /**
+     * Tương thích ngược từ UI-02; ưu tiên dùng {@link #joinRelaySession(String, int, String)}.
      */
     CompletableFuture<SessionViewModel> connectRelay(String pairingCode);
 

@@ -39,11 +39,13 @@ public record SessionViewModel(
 
     public enum SessionState {
         DISCONNECTED("Chưa kết nối (DISCONNECTED)"),
-        TCP_CONNECTED("Đã kết nối TCP (Chưa bắt tay TLS)"),
-        WAITING_FOR_FINGERPRINT("Chờ nhập vân tay đối tác (Kênh độc lập)"),
-        TLS_HANDSHAKING("Đang bắt tay Mutual TLS 1.3..."),
-        SECURE_READY("Kết nối an toàn đã xác thực (TLS 1.3)"),
-        ERROR("Lỗi kết nối / Xác thực thất bại"),
+        RELAY_CONNECTING("Đang kết nối tới Relay Server (Connecting)"),
+        WAITING_FOR_PEER("Đang chờ đối tác ghép nối qua Relay (Waiting for Peer)"),
+        TCP_CONNECTED("Đã ghép nối TCP (TCP Paired — Chưa bắt tay TLS)"),
+        WAITING_FOR_FINGERPRINT("Chờ nhập vân tay đối tác (Waiting for Fingerprint)"),
+        TLS_HANDSHAKING("Đang bắt tay Mutual TLS 1.3 (TLS Handshaking)..."),
+        SECURE_READY("Kết nối an toàn đã xác thực (Secure Ready — TLS 1.3)"),
+        ERROR("Lỗi kết nối / Xác thực thất bại (Failed)"),
         CLOSED("Đã đóng kết nối (CLOSED)");
 
         private final String displayName;

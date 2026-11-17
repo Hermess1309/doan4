@@ -3,6 +3,7 @@ package vn.edu.p2p.desktop.adapter;
 import java.io.File;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
+import vn.edu.p2p.desktop.model.RelayTicketInfo;
 import vn.edu.p2p.desktop.model.SessionViewModel;
 import vn.edu.p2p.desktop.model.TransferViewModel;
 
@@ -18,6 +19,19 @@ public class DummyCoreApiAdapter implements CoreApiAdapter {
     @Override
     public CompletableFuture<SessionViewModel> connectDirect(String host, int port) {
         return CompletableFuture.completedFuture(SessionViewModel.createDisconnected());
+    }
+
+    @Override
+    public CompletableFuture<RelayTicketInfo> createRelaySession(String relayHost, int relayPort) {
+        return CompletableFuture.failedFuture(
+                new UnsupportedOperationException("DummyCoreApiAdapter không hỗ trợ kết nối Relay thật."));
+    }
+
+    @Override
+    public CompletableFuture<SessionViewModel> joinRelaySession(
+            String relayHost, int relayPort, String pairingCode) {
+        return CompletableFuture.failedFuture(
+                new UnsupportedOperationException("DummyCoreApiAdapter không hỗ trợ kết nối Relay thật."));
     }
 
     @Override

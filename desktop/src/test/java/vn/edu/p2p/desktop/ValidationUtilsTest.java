@@ -88,6 +88,21 @@ class ValidationUtilsTest {
     }
 
     @Test
+    void testRelayM6PairingCodeValidation() {
+        assertTrue(ValidationUtils.isValidRelayPairingCode("ABCDEFGH2345"));
+        assertTrue(ValidationUtils.isValidRelayPairingCode("  abcdefgh2345  "));
+        assertEquals("ABCDEFGH2345", ValidationUtils.canonicalizeRelayPairingCode("abcdefgh2345"));
+
+        // Sai độ dài hoặc chứa ký tự cấm (0, 1, I, O, dấu gạch)
+        assertFalse(ValidationUtils.isValidRelayPairingCode("SHORT12"));
+        assertFalse(ValidationUtils.isValidRelayPairingCode("ABCDEFGH23456"));
+        assertFalse(ValidationUtils.isValidRelayPairingCode("ABCDEFGH01IO"));
+        assertFalse(ValidationUtils.isValidRelayPairingCode("ABCD-EFGH-23"));
+        assertFalse(ValidationUtils.isValidRelayPairingCode(null));
+        assertEquals("", ValidationUtils.canonicalizeRelayPairingCode("INVALID"));
+    }
+
+    @Test
     void testValidFingerprint() {
         // Dạng 64 ký tự hex liên tiếp
         String hex64 = "E47B9A128C3DF055A1B2C3D499887766102F4E6DAABBCCDD0123456789ABCDEF";
