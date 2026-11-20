@@ -8,6 +8,7 @@ import java.awt.Font;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
+import java.awt.Rectangle;
 import java.awt.Toolkit;
 import java.awt.datatransfer.StringSelection;
 import java.util.function.BiConsumer;
@@ -19,7 +20,10 @@ import javax.swing.JButton;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JRadioButton;
+import javax.swing.JScrollPane;
 import javax.swing.JTextField;
+import javax.swing.ScrollPaneConstants;
+import javax.swing.Scrollable;
 import vn.edu.p2p.desktop.model.RelayTicketInfo;
 import vn.edu.p2p.desktop.model.SessionViewModel;
 import vn.edu.p2p.desktop.model.SessionViewModel.SessionState;
@@ -68,8 +72,10 @@ public class DevicesPanel extends JPanel {
     private Runnable onDisconnectRequested;
 
     public DevicesPanel() {
-        setLayout(new BorderLayout(16, 16));
-        setBorder(BorderFactory.createEmptyBorder(16, 24, 16, 24));
+        setLayout(new BorderLayout());
+
+        JPanel contentWrapper = new ViewportWidthTrackingPanel();
+        contentWrapper.setBorder(BorderFactory.createEmptyBorder(14, 18, 14, 18));
 
         JPanel container = new JPanel();
         container.setLayout(new BoxLayout(container, BoxLayout.Y_AXIS));
@@ -78,9 +84,8 @@ public class DevicesPanel extends JPanel {
         JPanel formCard = createCardPanel("Thiết lập kết nối mới");
         formCard.setLayout(new GridBagLayout());
         GridBagConstraints gbc = new GridBagConstraints();
-        gbc.insets = new Insets(5, 8, 5, 8);
+        gbc.insets = new Insets(5, 6, 5, 6);
         gbc.anchor = GridBagConstraints.WEST;
-        gbc.fill = GridBagConstraints.HORIZONTAL;
 
         // A. Chế độ LAN trực tiếp
         rbLan = new JRadioButton("A. Kết nối trực tiếp LAN (IP / Hostname & Port)", true);
@@ -92,22 +97,34 @@ public class DevicesPanel extends JPanel {
         gbc.gridx = 0;
         gbc.gridy = 0;
         gbc.gridwidth = 3;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
         formCard.add(rbLan, gbc);
 
         gbc.gridwidth = 1;
         gbc.gridx = 0;
         gbc.gridy = 1;
-        formCard.add(new JLabel("Địa chỉ IP hoặc Hostname:"), gbc);
+        gbc.weightx = 0.0;
+        gbc.fill = GridBagConstraints.NONE;
+        formCard.add(new JLabel("IP / Hostname:"), gbc);
 
         gbc.gridx = 1;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
         txtHostIp = new JTextField("192.168.1.20", 15);
+        configurePrimaryInputField(txtHostIp);
         formCard.add(txtHostIp, gbc);
 
         gbc.gridx = 2;
-        JPanel portPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        gbc.weightx = 0.0;
+        gbc.fill = GridBagConstraints.NONE;
+        JPanel portPanel = createHorizontalRow();
         portPanel.add(new JLabel("Cổng:"));
+        portPanel.add(Box.createRigidArea(new Dimension(6, 0)));
         txtPort = new JTextField("52001", 6);
+        configurePortField(txtPort);
         portPanel.add(txtPort);
+        portPanel.add(Box.createRigidArea(new Dimension(6, 0)));
         btnConnectLan = new JButton("Kết nối LAN");
         portPanel.add(btnConnectLan);
         formCard.add(portPanel, gbc);
@@ -116,83 +133,127 @@ public class DevicesPanel extends JPanel {
         gbc.gridx = 0;
         gbc.gridy = 2;
         gbc.gridwidth = 3;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
         formCard.add(rbRelay, gbc);
 
         // Relay Host + Port
         gbc.gridwidth = 1;
         gbc.gridx = 0;
         gbc.gridy = 3;
-        formCard.add(new JLabel("Relay Server Host:"), gbc);
+        gbc.weightx = 0.0;
+        gbc.fill = GridBagConstraints.NONE;
+        formCard.add(new JLabel("Relay Host:"), gbc);
 
         gbc.gridx = 1;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
         txtRelayHost = new JTextField("127.0.0.1", 15);
+        configurePrimaryInputField(txtRelayHost);
         txtRelayHost.setEnabled(false);
         formCard.add(txtRelayHost, gbc);
 
         gbc.gridx = 2;
-        JPanel relayPortPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        gbc.weightx = 0.0;
+        gbc.fill = GridBagConstraints.NONE;
+        JPanel relayPortPanel = createHorizontalRow();
         relayPortPanel.add(new JLabel("Cổng Relay:"));
+        relayPortPanel.add(Box.createRigidArea(new Dimension(6, 0)));
         txtRelayPort = new JTextField("47000", 6);
+        configurePortField(txtRelayPort);
         txtRelayPort.setEnabled(false);
         relayPortPanel.add(txtRelayPort);
         formCard.add(relayPortPanel, gbc);
 
-        // Máy nhận: Tạo mã ghép nối & hiển thị mã + Sao chép
+        // Máy nhận: Tạo mã ghép nối & hiển thị mã
         gbc.gridx = 0;
         gbc.gridy = 4;
-        formCard.add(new JLabel("Máy nhận (Tạo phiên chờ):"), gbc);
+        gbc.weightx = 0.0;
+        gbc.fill = GridBagConstraints.NONE;
+        formCard.add(new JLabel("Mã nhận (Tạo):"), gbc);
 
         gbc.gridx = 1;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
         txtGeneratedCode = new JTextField("", 15);
         txtGeneratedCode.setEditable(false);
         txtGeneratedCode.setFont(new Font(Font.MONOSPACED, Font.BOLD, 13));
+        configurePrimaryInputField(txtGeneratedCode);
         txtGeneratedCode.setToolTipText("Mã ghép nối 12 ký tự nhận từ Relay Server");
         formCard.add(txtGeneratedCode, gbc);
 
         gbc.gridx = 2;
-        JPanel createRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        gbc.weightx = 0.0;
+        gbc.fill = GridBagConstraints.NONE;
+        JPanel createRow = createHorizontalRow();
         btnCreateRelayCode = new JButton("Tạo mã ghép nối");
         btnCreateRelayCode.setEnabled(false);
+        createRow.add(btnCreateRelayCode);
+        formCard.add(createRow, gbc);
+
+        // Nút Sao chép mã + nhãn TTL đặt gọn dưới ô mã để ô mã 12 ký tự luôn rộng rãi
+        gbc.gridx = 1;
+        gbc.gridy = 5;
+        gbc.gridwidth = 2;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        JPanel copyAndTtlRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
         btnCopyRelayCode = new JButton("Sao chép mã");
         btnCopyRelayCode.setEnabled(false);
         lblRelayTtl = new JLabel("");
         lblRelayTtl.setFont(lblRelayTtl.getFont().deriveFont(Font.ITALIC, 11f));
-        createRow.add(btnCreateRelayCode);
-        createRow.add(btnCopyRelayCode);
-        createRow.add(lblRelayTtl);
-        formCard.add(createRow, gbc);
+        copyAndTtlRow.add(btnCopyRelayCode);
+        copyAndTtlRow.add(Box.createRigidArea(new Dimension(8, 0)));
+        copyAndTtlRow.add(lblRelayTtl);
+        formCard.add(copyAndTtlRow, gbc);
 
         // Máy gửi: Nhập mã ghép nối & Kết nối bằng mã
+        gbc.gridwidth = 1;
         gbc.gridx = 0;
-        gbc.gridy = 5;
-        formCard.add(new JLabel("Máy gửi (Nhập mã 12 ký tự):"), gbc);
+        gbc.gridy = 6;
+        gbc.weightx = 0.0;
+        gbc.fill = GridBagConstraints.NONE;
+        formCard.add(new JLabel("Mã gửi (12 ký tự):"), gbc);
 
         gbc.gridx = 1;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
         txtPairingCode = new JTextField("", 15);
         txtPairingCode.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 13));
+        configurePrimaryInputField(txtPairingCode);
         txtPairingCode.setEnabled(false);
         formCard.add(txtPairingCode, gbc);
 
         gbc.gridx = 2;
+        gbc.weightx = 0.0;
+        gbc.fill = GridBagConstraints.NONE;
+        JPanel joinRow = createHorizontalRow();
         btnConnectRelay = new JButton("Kết nối bằng mã");
         btnConnectRelay.setEnabled(false);
-        formCard.add(btnConnectRelay, gbc);
+        joinRow.add(btnConnectRelay);
+        formCard.add(joinRow, gbc);
 
         // Nhắc nhở bảo mật Relay
         gbc.gridx = 0;
-        gbc.gridy = 6;
+        gbc.gridy = 7;
         gbc.gridwidth = 3;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
         JLabel lblRelaySecurityNote =
                 new JLabel(
                         "<html><i>* Lưu ý bảo mật: Mã ghép nối chỉ để định tuyến qua Relay, KHÔNG phải chứng cứ danh tính. "
                                 + "Sau khi ghép nối TCP, bắt buộc đối chiếu vân tay SHA-256 ở mục Bảo mật.</i></html>");
         lblRelaySecurityNote.setFont(lblRelaySecurityNote.getFont().deriveFont(11f));
+        lblRelaySecurityNote.setMinimumSize(new Dimension(120, 32));
+        lblRelaySecurityNote.setPreferredSize(new Dimension(460, 34));
         formCard.add(lblRelaySecurityNote, gbc);
 
         // Thông báo lỗi nhập liệu / kết nối
         gbc.gridx = 0;
-        gbc.gridy = 7;
+        gbc.gridy = 8;
         gbc.gridwidth = 3;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
         lblInputError = new JLabel("");
         lblInputError.setForeground(new Color(229, 87, 83));
         lblInputError.setFont(lblInputError.getFont().deriveFont(Font.BOLD, 12f));
@@ -225,22 +286,32 @@ public class DevicesPanel extends JPanel {
 
         gbcSession.gridx = 0;
         gbcSession.gridy = 0;
+        gbcSession.weightx = 0.0;
+        gbcSession.fill = GridBagConstraints.NONE;
         sessionCard.add(new JLabel("Trạng thái:"), gbcSession);
         gbcSession.gridx = 1;
+        gbcSession.weightx = 1.0;
+        gbcSession.fill = GridBagConstraints.HORIZONTAL;
         lblConnectionStatus = new JLabel("CHƯA KẾT NỐI (DISCONNECTED)");
         lblConnectionStatus.setFont(lblConnectionStatus.getFont().deriveFont(Font.BOLD));
         sessionCard.add(lblConnectionStatus, gbcSession);
 
         gbcSession.gridx = 0;
         gbcSession.gridy = 1;
+        gbcSession.weightx = 0.0;
+        gbcSession.fill = GridBagConstraints.NONE;
         sessionCard.add(new JLabel("Chi tiết đối tác:"), gbcSession);
         gbcSession.gridx = 1;
+        gbcSession.weightx = 1.0;
+        gbcSession.fill = GridBagConstraints.HORIZONTAL;
         lblPeerDetails = new JLabel("Chưa có đối tác kết nối.");
         sessionCard.add(lblPeerDetails, gbcSession);
 
         gbcSession.gridx = 0;
         gbcSession.gridy = 2;
         gbcSession.gridwidth = 2;
+        gbcSession.weightx = 1.0;
+        gbcSession.fill = GridBagConstraints.NONE;
         btnDisconnect = new JButton("Hủy kết nối");
         btnDisconnect.setEnabled(false);
         sessionCard.add(btnDisconnect, gbcSession);
@@ -249,7 +320,15 @@ public class DevicesPanel extends JPanel {
         container.add(Box.createRigidArea(new Dimension(0, 12)));
         container.add(sessionCard);
 
-        add(container, BorderLayout.NORTH);
+        contentWrapper.add(container, BorderLayout.NORTH);
+        JScrollPane scrollPane =
+                new JScrollPane(
+                        contentWrapper,
+                        ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED,
+                        ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        scrollPane.setBorder(BorderFactory.createEmptyBorder());
+        scrollPane.getVerticalScrollBar().setUnitIncrement(16);
+        add(scrollPane, BorderLayout.CENTER);
 
         // Sự kiện validation khi bấm nút (không gọi socket blocking trên EDT)
         btnConnectLan.addActionListener(e -> validateAndHandleLanConnect());
@@ -263,6 +342,63 @@ public class DevicesPanel extends JPanel {
                         onDisconnectRequested.run();
                     }
                 });
+    }
+
+    private static JPanel createHorizontalRow() {
+        JPanel row = new JPanel();
+        row.setLayout(new BoxLayout(row, BoxLayout.X_AXIS));
+        return row;
+    }
+
+    private static void configurePrimaryInputField(JTextField field) {
+        Dimension pref = field.getPreferredSize();
+        int height = Math.max(28, pref.height);
+        field.setMinimumSize(new Dimension(135, height));
+        field.setPreferredSize(new Dimension(Math.max(190, pref.width), height));
+    }
+
+    private static void configurePortField(JTextField field) {
+        Dimension pref = field.getPreferredSize();
+        int height = Math.max(28, pref.height);
+        Dimension fixed = new Dimension(Math.max(64, pref.width), height);
+        field.setMinimumSize(new Dimension(60, height));
+        field.setPreferredSize(fixed);
+        field.setMaximumSize(fixed);
+    }
+
+    /**
+     * Panel bám sát chiều rộng của JViewport để không bao giờ xuất hiện tràn ngang trong JScrollPane,
+     * trong khi vẫn cho phép cuộn dọc mượt mà khi cửa sổ bị thu nhỏ theo chiều cao.
+     */
+    private static final class ViewportWidthTrackingPanel extends JPanel implements Scrollable {
+        ViewportWidthTrackingPanel() {
+            super(new BorderLayout());
+        }
+
+        @Override
+        public Dimension getPreferredScrollableViewportSize() {
+            return getPreferredSize();
+        }
+
+        @Override
+        public int getScrollableUnitIncrement(Rectangle visibleRect, int orientation, int direction) {
+            return 16;
+        }
+
+        @Override
+        public int getScrollableBlockIncrement(Rectangle visibleRect, int orientation, int direction) {
+            return 64;
+        }
+
+        @Override
+        public boolean getScrollableTracksViewportWidth() {
+            return true;
+        }
+
+        @Override
+        public boolean getScrollableTracksViewportHeight() {
+            return false;
+        }
     }
 
     private void applyConnectionModeControls() {

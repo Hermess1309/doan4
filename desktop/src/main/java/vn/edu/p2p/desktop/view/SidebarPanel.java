@@ -82,7 +82,7 @@ public class SidebarPanel extends JPanel {
         footerPanel.setLayout(new BoxLayout(footerPanel, BoxLayout.Y_AXIS));
         footerPanel.setBorder(BorderFactory.createEmptyBorder(12, 16, 16, 16));
 
-        JLabel lblCoreStatus = new JLabel("● Core: M0 Scaffold");
+        JLabel lblCoreStatus = new JLabel("● Core M3 · Relay M6");
         lblCoreStatus.setFont(lblCoreStatus.getFont().deriveFont(Font.PLAIN, 11f));
         lblCoreStatus.setAlignmentX(Component.LEFT_ALIGNMENT);
 
