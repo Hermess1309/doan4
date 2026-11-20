@@ -1151,6 +1151,154 @@ class RelayCancellationRegressionTest {
         }
     }
 
+    @Test
+    void testCommitInstalledNeverCompletesFutureWhenShutdownAlreadyDetachedBeforeFutureCancel()
+            throws Exception {
+        CountDownLatch installedLatch = new CountDownLatch(1);
+        CountDownLatch releaseCommitLatch = new CountDownLatch(1);
+        CountDownLatch shutdownDetachedLatch = new CountDownLatch(1);
+        CountDownLatch releaseShutdownCancelLatch = new CountDownLatch(1);
+
+        receiverAdapter.setOnAfterOperationInstalledForTest(
+                () -> {
+                    installedLatch.countDown();
+                    try {
+                        releaseCommitLatch.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+        receiverAdapter.setOnBeforeCancelDetachedHandlesForTest(
+                () -> {
+                    shutdownDetachedLatch.countDown();
+                    try {
+                        releaseShutdownCancelLatch.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+
+        try (ServerSocket controlledServer =
+                new ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"))) {
+            CompletableFuture<Socket> acceptedRef = acceptAsync(controlledServer);
+            CompletableFuture<RelayTicketInfo> createFuture =
+                    receiverAdapter.createRelaySession("127.0.0.1", controlledServer.getLocalPort());
+
+            try (Socket serverSock = acceptedRef.get(5, TimeUnit.SECONDS)) {
+                assertEquals(5, serverSock.getInputStream().readNBytes(5).length);
+                DataOutputStream out = new DataOutputStream(serverSock.getOutputStream());
+                out.writeInt(RELAY_MAGIC);
+                out.writeByte(RELAY_STATUS_CREATED);
+                out.write("ABCDEFGH2345".getBytes(StandardCharsets.US_ASCII));
+                out.writeInt(60_000);
+                out.flush();
+
+                assertTrue(installedLatch.await(5, TimeUnit.SECONDS));
+
+                // Tái hiện xác định cửa sổ race trên CI: shutdown() đã gọi invalidateAndDetach()
+                // (chuyển opCtx.phase = CANCELLED) nhưng chưa kịp gọi resultFuture.cancel(false).
+                CompletableFuture<Void> shutdownTask =
+                        CompletableFuture.runAsync(() -> receiverAdapter.shutdown());
+                assertTrue(shutdownDetachedLatch.await(5, TimeUnit.SECONDS));
+
+                // Thả worker vào commitInstalledOperation() trước khi shutdown() hủy resultFuture
+                releaseCommitLatch.countDown();
+                try {
+                    createFuture.get(2, TimeUnit.SECONDS);
+                } catch (CancellationException expected) {
+                    // Đúng hành vi: worker phải hủy future, tuyệt đối không complete(ticketInfo)
+                }
+
+                long startNanos = System.nanoTime();
+                releaseShutdownCancelLatch.countDown();
+                shutdownTask.get(5, TimeUnit.SECONDS);
+
+                assertTrue(receiverAdapter.isShutdown());
+                assertTrue(
+                        createFuture.isDone() && createFuture.isCancelled(),
+                        "createFuture phải bị hủy khi shutdown() đã detach trước commitInstalledOperation()");
+                assertSocketClosedWithin(serverSock, startNanos, CANCEL_DEADLINE_MS);
+            }
+        } finally {
+            releaseCommitLatch.countDown();
+            releaseShutdownCancelLatch.countDown();
+            receiverAdapter.setOnAfterOperationInstalledForTest(null);
+            receiverAdapter.setOnBeforeCancelDetachedHandlesForTest(null);
+        }
+    }
+
+    @Test
+    void testCommitInstalledNeverCompletesFutureWhenDisconnectAlreadyDetachedBeforeFutureCancel()
+            throws Exception {
+        CountDownLatch installedLatch = new CountDownLatch(1);
+        CountDownLatch releaseCommitLatch = new CountDownLatch(1);
+        CountDownLatch disconnectDetachedLatch = new CountDownLatch(1);
+        CountDownLatch releaseDisconnectCancelLatch = new CountDownLatch(1);
+
+        senderAdapter.setOnAfterOperationInstalledForTest(
+                () -> {
+                    installedLatch.countDown();
+                    try {
+                        releaseCommitLatch.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+        senderAdapter.setOnBeforeCancelDetachedHandlesForTest(
+                () -> {
+                    disconnectDetachedLatch.countDown();
+                    try {
+                        releaseDisconnectCancelLatch.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+
+        try (ServerSocket controlledServer =
+                new ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"))) {
+            CompletableFuture<Socket> acceptedRef = acceptAsync(controlledServer);
+            CompletableFuture<SessionViewModel> joinFuture =
+                    senderAdapter.joinRelaySession(
+                            "127.0.0.1", controlledServer.getLocalPort(), "ABCDEFGH2345");
+
+            try (Socket serverSock = acceptedRef.get(5, TimeUnit.SECONDS)) {
+                assertEquals(17, serverSock.getInputStream().readNBytes(17).length);
+                DataOutputStream out = new DataOutputStream(serverSock.getOutputStream());
+                out.writeInt(RELAY_MAGIC);
+                out.writeByte(RELAY_STATUS_PAIRED);
+                out.flush();
+
+                assertTrue(installedLatch.await(5, TimeUnit.SECONDS));
+
+                CompletableFuture<CompletableFuture<Void>> disconnectTask =
+                        CompletableFuture.supplyAsync(() -> senderAdapter.disconnect(null));
+                assertTrue(disconnectDetachedLatch.await(5, TimeUnit.SECONDS));
+
+                // Thả worker vào commitInstalledOperation() khi disconnect() đã chuyển phase = CANCELLED
+                releaseCommitLatch.countDown();
+                try {
+                    joinFuture.get(2, TimeUnit.SECONDS);
+                } catch (CancellationException expected) {
+                    // Đúng hành vi: worker phải hủy future, không complete với session đã tách
+                }
+
+                long startNanos = System.nanoTime();
+                releaseDisconnectCancelLatch.countDown();
+                disconnectTask.get(5, TimeUnit.SECONDS).get(5, TimeUnit.SECONDS);
+
+                assertTrue(
+                        joinFuture.isDone() && joinFuture.isCancelled(),
+                        "joinFuture phải bị hủy khi disconnect() đã detach trước commitInstalledOperation()");
+                assertSocketClosedWithin(serverSock, startNanos, CANCEL_DEADLINE_MS);
+            }
+        } finally {
+            releaseCommitLatch.countDown();
+            releaseDisconnectCancelLatch.countDown();
+            senderAdapter.setOnAfterOperationInstalledForTest(null);
+            senderAdapter.setOnBeforeCancelDetachedHandlesForTest(null);
+        }
+    }
+
     private static CompletableFuture<Socket> acceptAsync(ServerSocket serverSocket) {
         return CompletableFuture.supplyAsync(
                 () -> {
