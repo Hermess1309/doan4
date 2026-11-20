@@ -225,6 +225,7 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
     private volatile BiConsumer<FileOffer, Consumer<File>> incomingOfferHandler;
     private volatile Runnable onAfterOperationInstalledForTest;
     private volatile Runnable onAfterDisconnectDetachedForTest;
+    private volatile Runnable onBeforeCancelDetachedHandlesForTest;
 
     public RealCoreApiAdapter(PeerNode peerNode, int preferredPort) throws IOException {
         this.peerNode = Objects.requireNonNull(peerNode, "peerNode không được null");
@@ -268,6 +269,10 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
 
     void setOnAfterDisconnectDetachedForTest(Runnable hook) {
         this.onAfterDisconnectDetachedForTest = hook;
+    }
+
+    void setOnBeforeCancelDetachedHandlesForTest(Runnable hook) {
+        this.onBeforeCancelDetachedHandlesForTest = hook;
     }
 
     @Override
@@ -1287,6 +1292,10 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
         if (detached == null) {
             return CompletableFuture.completedFuture(null);
         }
+        Runnable beforeCancelHook = this.onBeforeCancelDetachedHandlesForTest;
+        if (beforeCancelHook != null) {
+            beforeCancelHook.run();
+        }
         cancelDetachedAsyncHandles(detached);
 
         Runnable detachHook = this.onAfterDisconnectDetachedForTest;
@@ -1315,6 +1324,10 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
     public void shutdown() {
         DetachedResources detached = invalidateAndDetach(null, true);
         if (detached != null) {
+            Runnable beforeCancelHook = this.onBeforeCancelDetachedHandlesForTest;
+            if (beforeCancelHook != null) {
+                beforeCancelHook.run();
+            }
             cancelDetachedAsyncHandles(detached);
             closeDetachedIoSafely(detached);
         }
@@ -1429,17 +1442,23 @@ public class RealCoreApiAdapter implements CoreApiAdapter {
             testHook.run();
         }
 
+        boolean abortedBeforeComplete = false;
         DetachedResources preCancelDetach = null;
         synchronized (sessionLock) {
             if (opCtx.phase != OperationPhase.INSTALLED
                     || !running.get()
                     || activeGeneration.get() != opCtx.generation
                     || resultFuture.isCancelled()) {
+                abortedBeforeComplete = true;
                 preCancelDetach = cancelOperationLocked(opCtx);
             }
         }
-        if (preCancelDetach != null) {
-            finishCancellationOutsideLock(preCancelDetach);
+        if (abortedBeforeComplete) {
+            if (preCancelDetach != null) {
+                finishCancellationOutsideLock(preCancelDetach);
+            } else {
+                resultFuture.cancel(false);
+            }
             return false;
         }
 
