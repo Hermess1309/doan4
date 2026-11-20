@@ -56,8 +56,12 @@ public class TransfersPanel extends JPanel {
         // Tên file
         gbc.gridx = 0;
         gbc.gridy = 0;
+        gbc.weightx = 0.0;
+        gbc.fill = GridBagConstraints.NONE;
         card.add(new JLabel("Tệp tin:"), gbc);
         gbc.gridx = 1;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
         lblFileName = new JLabel("(Chưa có tệp tin đang truyền)");
         lblFileName.setFont(lblFileName.getFont().deriveFont(Font.BOLD, 14f));
         card.add(lblFileName, gbc);
@@ -65,24 +69,36 @@ public class TransfersPanel extends JPanel {
         // Kích thước & Bytes đã truyền
         gbc.gridx = 0;
         gbc.gridy = 1;
+        gbc.weightx = 0.0;
+        gbc.fill = GridBagConstraints.NONE;
         card.add(new JLabel("Dung lượng đã truyền:"), gbc);
         gbc.gridx = 1;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
         lblFileSize = new JLabel("0 B / 0 B");
         card.add(lblFileSize, gbc);
 
         // Hướng truyền
         gbc.gridx = 0;
         gbc.gridy = 2;
+        gbc.weightx = 0.0;
+        gbc.fill = GridBagConstraints.NONE;
         card.add(new JLabel("Chiều truyền:"), gbc);
         gbc.gridx = 1;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
         lblTransferDirection = new JLabel("Không hoạt động");
         card.add(lblTransferDirection, gbc);
 
         // Tốc độ & ETA
         gbc.gridx = 0;
         gbc.gridy = 3;
+        gbc.weightx = 0.0;
+        gbc.fill = GridBagConstraints.NONE;
         card.add(new JLabel("Tốc độ mạng:"), gbc);
         gbc.gridx = 1;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
         JPanel speedRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 12, 0));
         lblSpeed = new JLabel("0.0 KB/s");
         lblSpeed.setFont(lblSpeed.getFont().deriveFont(Font.BOLD));
@@ -95,8 +111,12 @@ public class TransfersPanel extends JPanel {
         // Trạng thái
         gbc.gridx = 0;
         gbc.gridy = 4;
+        gbc.weightx = 0.0;
+        gbc.fill = GridBagConstraints.NONE;
         card.add(new JLabel("Trạng thái:"), gbc);
         gbc.gridx = 1;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
         lblState = new JLabel("SẴN SÀNG (CHỜ TỆP TIN)");
         lblState.setFont(lblState.getFont().deriveFont(Font.BOLD));
         card.add(lblState, gbc);
@@ -105,28 +125,33 @@ public class TransfersPanel extends JPanel {
         gbc.gridx = 0;
         gbc.gridy = 5;
         gbc.gridwidth = 2;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
         lblError = new JLabel("");
         lblError.setForeground(new Color(229, 87, 83));
         lblError.setFont(lblError.getFont().deriveFont(Font.BOLD, 12f));
         card.add(lblError, gbc);
 
-        // Progress Bar
+        // Progress Bar (tuyệt đối không đặt preferred width Integer.MAX_VALUE trong GridBagLayout)
         gbc.gridx = 0;
         gbc.gridy = 6;
         gbc.gridwidth = 2;
+        gbc.weightx = 1.0;
         gbc.fill = GridBagConstraints.HORIZONTAL;
         progressBar = new JProgressBar(0, 100);
         progressBar.setValue(0);
         progressBar.setStringPainted(true);
         progressBar.setString("0%");
-        progressBar.setPreferredSize(new Dimension(Integer.MAX_VALUE, 26));
+        progressBar.setMinimumSize(new Dimension(180, 26));
+        progressBar.setPreferredSize(new Dimension(360, 26));
         card.add(progressBar, gbc);
 
         // Điều khiển (Nút bấm)
         gbc.gridx = 0;
         gbc.gridy = 7;
         gbc.gridwidth = 2;
-        gbc.fill = GridBagConstraints.NONE;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
         JPanel actionsRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 8));
         btnCancel = new JButton("Hủy truyền");
         btnCancel.setEnabled(false); // Disabled khi chưa có backend thật
