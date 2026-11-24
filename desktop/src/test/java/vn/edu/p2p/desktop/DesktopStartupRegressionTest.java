@@ -185,8 +185,8 @@ class DesktopStartupRegressionTest {
                                 frame.getSecurityPanel().getBtnOpenVerificationDialog().isEnabled(),
                                 "Nút xác minh phải bị khóa khi khởi tạo lỗi");
                         assertFalse(
-                                frame.getSecurityPanel().getBtnPreviewDialog().isEnabled(),
-                                "Nút preview phải bị khóa khi khởi tạo lỗi để tránh hiển thị vân tay giả");
+                                frame.getSecurityPanel().getBtnCopyLocalFingerprint().isEnabled(),
+                                "Nút sao chép vân tay phải bị khóa khi khởi tạo lỗi để tránh sao chép vân tay giả");
 
                         String displayedFp = frame.getSecurityPanel().getTxtLocalFingerprint().getText();
                         assertFalse(

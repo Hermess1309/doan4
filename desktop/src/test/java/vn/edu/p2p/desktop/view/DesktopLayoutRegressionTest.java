@@ -1,5 +1,6 @@
 package vn.edu.p2p.desktop.view;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -20,6 +21,8 @@ import vn.edu.p2p.desktop.model.TransferViewModel;
 import vn.edu.p2p.desktop.model.TransferViewModel.TransferDirection;
 import vn.edu.p2p.desktop.model.TransferViewModel.TransferState;
 import vn.edu.p2p.desktop.view.screens.DevicesPanel;
+import vn.edu.p2p.desktop.view.screens.SecurityPanel;
+import vn.edu.p2p.desktop.view.screens.SettingsPanel;
 import vn.edu.p2p.desktop.view.screens.TransfersPanel;
 
 /**
@@ -143,6 +146,63 @@ class DesktopLayoutRegressionTest {
                     assertFalse(
                             labelTexts.stream().anyMatch(t -> t.contains("M0 Scaffold")),
                             "Sidebar không được giữ nhãn cũ 'M0 Scaffold'");
+                });
+    }
+
+    @Test
+    void testSecurityPanelRemovesPreviewButtonAndSupportsCopyFingerprint() throws Exception {
+        String sampleFp = "79d1665f9bd5f56abc2fabdeeb00739414ac1946a3cfdac9e579d351a0741954";
+        SwingUtilities.invokeAndWait(
+                () -> {
+                    SecurityPanel panel = new SecurityPanel();
+                    List<String> buttonTexts =
+                            findAll(panel, JButton.class).stream()
+                                    .map(JButton::getText)
+                                    .filter(t -> t != null)
+                                    .toList();
+                    assertFalse(
+                            buttonTexts.stream().anyMatch(t -> t.contains("Xem trước") || t.contains("Preview")),
+                            "Không còn hiển thị nút xem trước hộp thoại trên SecurityPanel");
+                    assertTrue(
+                            buttonTexts.stream().anyMatch(t -> t.contains("Sao chép mã vân tay")),
+                            "Phải có nút 'Sao chép mã vân tay' trên SecurityPanel");
+                    assertFalse(
+                            panel.getBtnCopyLocalFingerprint().isEnabled(),
+                            "Nút sao chép phải khóa khi chưa có vân tay cục bộ hợp lệ");
+
+                    panel.setLocalFingerprint(sampleFp);
+                    assertTrue(
+                            panel.getBtnCopyLocalFingerprint().isEnabled(),
+                            "Nút sao chép phải bật khi có vân tay cục bộ hợp lệ");
+                    assertEquals(sampleFp.toUpperCase(), panel.getLocalFingerprintCanonical());
+
+                    panel.setBackendFailed("Simulated failure");
+                    assertFalse(
+                            panel.getBtnCopyLocalFingerprint().isEnabled(),
+                            "Nút sao chép phải khóa lại khi backend bảo mật lỗi");
+                    assertEquals("", panel.getLocalFingerprintCanonical());
+                });
+    }
+
+    @Test
+    void testSettingsPanelAboutCardShowsOnlyProjectTopic() throws Exception {
+        SwingUtilities.invokeAndWait(
+                () -> {
+                    SettingsPanel panel = new SettingsPanel();
+                    List<String> labelTexts =
+                            findAll(panel, JLabel.class).stream()
+                                    .map(JLabel::getText)
+                                    .filter(t -> t != null)
+                                    .toList();
+                    assertTrue(
+                            labelTexts.stream().anyMatch(t -> t.contains("Đề tài:")),
+                            "Thẻ Thông tin Đồ án 4 phải hiển thị dòng 'Đề tài:'");
+                    assertTrue(
+                            labelTexts.stream().anyMatch(t -> t.contains("P2P File Transfer ngang hàng bảo mật E2E")),
+                            "Thẻ Thông tin Đồ án 4 phải hiển thị tên đề tài");
+                    assertFalse(
+                            labelTexts.stream().anyMatch(t -> t.contains("Phiên bản:") || t.contains("Đội ngũ phát triển:")),
+                            "Thẻ Thông tin Đồ án 4 không được hiển thị dòng Phiên bản hoặc Đội ngũ phát triển");
                 });
     }
 
