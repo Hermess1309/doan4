@@ -96,18 +96,6 @@ public class SettingsPanel extends JPanel {
         lblTitle.setFont(lblTitle.getFont().deriveFont(Font.BOLD));
         aboutCard.add(lblTitle, gbc);
 
-        gbc.gridx = 0;
-        gbc.gridy = 1;
-        aboutCard.add(new JLabel("Phiên bản:"), gbc);
-        gbc.gridx = 1;
-        aboutCard.add(new JLabel("v0.1.0-alpha (Java 21 + FlatLaf 3.5.4)"), gbc);
-
-        gbc.gridx = 0;
-        gbc.gridy = 2;
-        aboutCard.add(new JLabel("Đội ngũ phát triển:"), gbc);
-        gbc.gridx = 1;
-        aboutCard.add(new JLabel("Sinh viên, Codex (Backend) và Antigravity (Desktop UI)"), gbc);
-
         container.add(dirCard);
         container.add(Box.createRigidArea(new Dimension(0, 16)));
         container.add(themeCard);
